@@ -1,0 +1,1 @@
+{"name":"samryetha-analysis","private":true,"devDependencies":{"eslint":"^10.9.1","eslint-plugin-react-hooks":"^7.1.1","eslint-plugin-security":"^4.0.1","globals":"^17.12.0","jsdom":"^30.0.1","typescript":"^5.9.3","typescript-eslint":"^8.69.0"}}

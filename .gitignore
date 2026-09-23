@@ -1,0 +1,12 @@
+# 运行时产物与本地状态（不入库）
+data/
+www/
+logs/
+__pycache__/
+*.pyc
+.service-secret
+update-config.json
+update-service/bin/
+update-service/update-service
+node_modules/
+.DS_Store

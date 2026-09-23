@@ -1,0 +1,24 @@
+[Unit]
+Description=Samryetha status/update admin service
+Documentation=https://status.samryetha.com
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+Environment=SAMRYETHA_ROOT=/opt/Samryetha
+Environment=LISTEN=127.0.0.1:3030
+Environment=OIDC_ISSUER=https://auth.samryetha.com
+Environment=OIDC_CLIENT_ID=samryetha-status
+Environment=OIDC_REDIRECT_URI=https://status.samryetha.com/update/callback
+Environment=ADMIN_EMAIL=tonytao2022@outlook.com
+Environment=PATH=/home/ubuntu/.local/bin:/home/ubuntu/.nvm/versions/node/v24.20.0/bin:/usr/bin:/bin:/usr/sbin:/sbin
+ExecStart=/opt/Samryetha/status/update-service/bin/update-service
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

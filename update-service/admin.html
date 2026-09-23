@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Samryetha · 更新后台</title>
+<style>
+:root{
+  --bg:#f7f8f8;--surface:#fff;--ink:#171a1c;--muted:#70777b;--faint:#a7adaf;
+  --line:#e1e4e5;--accent:#597585;--accent-fill:#3d7dbf;--accent-soft:#e7eef1;
+  --ok:#15803d;--warn:#b45309;--danger:#9a5555;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#111416;--surface:#171b1e;--ink:#eceeef;--muted:#8f989d;--faint:#687075;
+  --line:#292e31;--accent:#87a8b7;--accent-fill:#4a86cf;--accent-soft:#1d2a30;
+  --ok:#4ade80;--warn:#fbbf24;--danger:#d48686;
+}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font-family:ui-sans-serif,-apple-system,BlinkMacSystemFont,"SF Pro Text",Inter,"Noto Sans SC","PingFang SC",sans-serif;
+  -webkit-font-smoothing:antialiased;font-size:14px}
+a{color:var(--accent);text-decoration:none}
+.shell{width:min(calc(100% - 32px),1000px);margin:0 auto}
+header{border-bottom:1px solid var(--line);background:color-mix(in srgb,var(--bg) 86%,transparent);
+  position:sticky;top:0;z-index:10;backdrop-filter:saturate(140%) blur(18px)}
+.hd{height:56px;display:flex;align-items:center;justify-content:space-between;gap:16px}
+.brand{font-weight:680;letter-spacing:-.01em}
+.brand small{color:var(--muted);font-weight:500;margin-left:8px;font-size:12px}
+.hd .who{color:var(--muted);font-size:12px;display:flex;align-items:center;gap:12px}
+.btn{border:1px solid var(--line);background:transparent;color:var(--ink);border-radius:8px;
+  padding:7px 12px;font-size:13px;cursor:pointer;transition:.14s}
+.btn:hover{border-color:color-mix(in srgb,var(--accent) 40%,var(--line));background:var(--accent-soft)}
+.btn.primary{background:var(--ink);color:var(--bg);border-color:transparent;font-weight:600}
+.btn.primary:hover{opacity:.88;background:var(--ink)}
+.btn.danger{color:var(--danger);border-color:color-mix(in srgb,var(--danger) 40%,var(--line))}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+main{padding:28px 0 90px;display:flex;flex-direction:column;gap:18px}
+.card{border:1px solid var(--line);border-radius:14px;background:var(--surface);padding:18px 20px}
+.card h2{margin:0 0 14px;font-size:15px;font-weight:640;letter-spacing:-.01em}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:12px}
+.stat{border:1px solid var(--line);border-radius:12px;padding:12px 14px;background:color-mix(in srgb,var(--surface) 70%,transparent)}
+.stat .k{color:var(--muted);font-size:11.5px}
+.stat .v{font-size:15px;font-weight:640;margin-top:4px;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.row{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:11px 0;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.row:last-child{border-bottom:0}
+.row .lbl{display:flex;flex-direction:column;gap:2px}
+.row .lbl b{font-weight:600;font-size:13px}
+.row .lbl span{color:var(--muted);font-size:11.5px}
+input[type=text],select{height:36px;border:1px solid var(--line);border-radius:9px;background:color-mix(in srgb,var(--surface) 76%,transparent);
+  color:var(--ink);padding:0 10px;font-size:13px;min-width:0}
+input[type=text]{width:100%}
+input[type=text]:focus,select:focus{outline:0;border-color:color-mix(in srgb,var(--accent) 62%,var(--line))}
+.toggle{position:relative;width:42px;height:24px;flex:0 0 auto;border:1px solid var(--line);border-radius:999px;
+  background:color-mix(in srgb,var(--faint) 20%,transparent);cursor:pointer;transition:.16s;padding:0}
+.toggle i{position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:999px;background:var(--surface);
+  box-shadow:0 1px 3px rgba(0,0,0,.2);transition:transform .18s}
+.toggle.on{background:var(--accent-fill);border-color:var(--accent-fill)}
+.toggle.on i{transform:translateX(18px)}
+.pill{display:inline-flex;align-items:center;gap:6px;height:22px;padding:0 9px;border-radius:999px;
+  border:1px solid var(--line);font-size:11px;color:var(--muted)}
+.pill.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 34%,var(--line))}
+.pill.warn{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 34%,var(--line))}
+.pill.err{color:var(--danger);border-color:color-mix(in srgb,var(--danger) 34%,var(--line))}
+pre.log{margin:0;max-height:360px;overflow:auto;background:color-mix(in srgb,var(--ink) 4%,transparent);
+  border:1px solid var(--line);border-radius:10px;padding:12px;font-size:12px;line-height:1.55;
+  font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;white-space:pre-wrap;word-break:break-word}
+.muted{color:var(--muted);font-size:12px}
+.actions{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.ver{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:9px 0;border-bottom:1px solid var(--line)}
+.ver:last-child{border-bottom:0}
+.ver code{font-family:ui-monospace,Menlo,monospace;font-size:12px}
+.commit{display:flex;gap:10px;padding:7px 0;border-bottom:1px solid var(--line);font-size:12.5px}
+.commit:last-child{border-bottom:0}
+.commit code{color:var(--accent);font-family:ui-monospace,Menlo,monospace;flex:0 0 auto}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th,td{text-align:left;padding:7px 6px;border-bottom:1px solid var(--line)}
+th{color:var(--muted);font-weight:600}
+#toast{position:fixed;right:18px;bottom:18px;display:flex;flex-direction:column;gap:8px;z-index:50}
+#toast div{border:1px solid var(--line);background:var(--surface);border-radius:10px;padding:10px 14px;
+  font-size:12.5px;box-shadow:0 10px 28px rgba(0,0,0,.16)}
+@media (max-width:640px){.hd .who span{display:none}.card{padding:16px}}
+</style>
+</head>
+<body data-csrf="{{.CSRF}}">
+<header><div class="shell hd">
+  <div class="brand">Samryetha <small>更新后台</small></div>
+  <div class="who"><span class="pill" id="ws-badge">连接中</span><span>{{.Email}}</span>
+    <a class="btn" href="/" target="_blank" rel="noopener">状态页</a>
+    <a class="btn danger" href="/update/logout">退出</a>
+  </div>
+</div></header>
+
+<main class="shell">
+  <section class="card">
+    <h2>概览</h2>
+    <div class="grid" id="overview"></div>
+  </section>
+
+  <section class="card">
+    <h2>自动更新参数</h2>
+    <div class="row">
+      <div class="lbl"><b>主站自动更新（main）</b><span>关闭后 cron 仍每 5 分钟跑，但跳过主站部署</span></div>
+      <button class="toggle" id="t-main" type="button" aria-label="主站自动更新"><i></i></button>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>主站分支</b><span>默认 main</span></div>
+      <div style="width:220px"><input type="text" id="b-main" placeholder="main"></div>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>dev 自动更新（dev）</b><span>development.samryetha.com</span></div>
+      <button class="toggle" id="t-dev" type="button" aria-label="dev 自动更新"><i></i></button>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>dev 分支</b><span>默认 dev</span></div>
+      <div style="width:220px"><input type="text" id="b-dev" placeholder="dev"></div>
+    </div>
+    <div class="row">
+      <div class="lbl"><b>告警 Webhook</b><span>更新失败/回滚/成功时 POST 一条消息（可空）</span></div>
+      <div style="width:320px;display:flex;gap:8px"><input type="text" id="w-hook" placeholder="https://..."><button class="btn" id="test-hook" type="button">测试</button></div>
+    </div>
+    <div class="actions" style="margin-top:14px">
+      <button class="btn primary" id="save" type="button">保存参数</button>
+      <span class="muted" id="save-state"></span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>操作</h2>
+    <div class="actions">
+      <button class="btn primary" id="run" type="button">立即更新</button>
+      <button class="btn" id="run-force" type="button">强制重新部署</button>
+      <button class="btn" id="regen" type="button">重新生成状态页</button>
+      <button class="btn" id="codecheck" type="button">运行代码体检</button>
+      <button class="btn" id="backup" type="button">立即备份数据库</button>
+    </div>
+    <div class="actions" style="margin-top:12px">
+      <select id="restart-app">
+        <option value="samryetha-backend">主站后端</option>
+        <option value="samryetha-frontend">主站前端</option>
+        <option value="samryetha-dev-backend">dev 后端</option>
+        <option value="samryetha-dev-frontend">dev 前端</option>
+      </select>
+      <button class="btn" id="restart" type="button">重启所选服务</button>
+      <span class="muted" id="op-state"></span>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>可回滚版本</h2>
+    <div id="versions"><div class="muted">暂无</div></div>
+  </section>
+
+  <section class="card">
+    <h2>数据库备份</h2>
+    <table><thead><tr><th>备份</th><th>时间</th></tr></thead><tbody id="backups"></tbody></table>
+  </section>
+
+  <section class="card">
+    <h2>最近提交（main）</h2>
+    <div id="gitlog"></div>
+  </section>
+
+  <section class="card">
+    <h2>日志</h2>
+    <div class="actions" style="margin-bottom:12px">
+      <select id="log-file">
+        <option value="update">update.log</option>
+        <option value="backend">backend.log</option>
+        <option value="frontend">frontend.log</option>
+        <option value="dev-backend">dev-backend.log</option>
+        <option value="dev-frontend">dev-frontend.log</option>
+        <option value="status-gen">status-gen.log</option>
+      </select>
+      <button class="btn" id="log-refresh" type="button">刷新日志</button>
+    </div>
+    <pre class="log" id="log">加载中…</pre>
+  </section>
+
+  <section class="card">
+    <h2>操作审计</h2>
+    <table><thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>详情</th></tr></thead><tbody id="actions"></tbody></table>
+  </section>
+</main>
+<div id="toast"></div>
+<script>
+const csrf = document.body.dataset.csrf || "";
+function esc(s){return String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));}
+function toast(msg,bad){const b=document.getElementById("toast");const e=document.createElement("div");e.textContent=msg;if(bad)e.style.color="var(--danger)";b.appendChild(e);setTimeout(()=>e.remove(),3500);}
+async function api(path,opts){opts=opts||{};opts.headers=Object.assign({"X-CSRF":csrf},opts.headers||{});const r=await fetch(path,opts);const ct=r.headers.get("content-type")||"";const body=ct.includes("json")?await r.json():await r.text();if(!r.ok)throw new Error((body&&body.error)||r.status);return body;}
+function fmtTime(ts){return ts?new Date(ts*1000).toLocaleString():"—";}
+function setToggle(id,on){document.getElementById(id).classList.toggle("on",!!on);}
+function isOn(id){return document.getElementById(id).classList.contains("on");}
+let cfg={main:{enabled:true,branch:"main"},dev:{enabled:true,branch:"dev"},notify:{webhook:""}};
+function bindToggle(id){document.getElementById(id).addEventListener("click",()=>document.getElementById(id).classList.toggle("on"));}
+
+// WebSocket 实时推送；断开自动回退轮询并重连。
+let ws=null, wsAlive=false;
+function wsURL(){return (location.protocol==="https:"?"wss://":"ws://")+location.host+"/api/update/ws";}
+function wsBadge(on){const el=document.getElementById("ws-badge");if(!el)return;el.textContent=on?"实时":"轮询";el.className="pill "+(on?"ok":"warn");}
+function connectWS(){
+  try{ws=new WebSocket(wsURL());}catch(e){wsBadge(false);setTimeout(connectWS,3000);return;}
+  ws.onopen=()=>{wsAlive=true;wsBadge(true);};
+  ws.onmessage=ev=>{try{const m=JSON.parse(ev.data);if(m.state)render(m.state);}catch(e){}};
+  ws.onclose=()=>{wsAlive=false;wsBadge(false);setTimeout(connectWS,3000);};
+  ws.onerror=()=>{try{ws.close();}catch(e){}};
+}
+
+function render(s){
+  cfg=Object.assign(cfg,s.config||{});
+  const apps=(s.pm2&&s.pm2.apps)||{};
+  const appPill=n=>{const a=apps[n];if(!a)return '<span class="pill">离线</span>';const ok=a.status==="online";return '<span class="pill '+(ok?"ok":"err")+'">'+esc(a.status)+' · '+a.mem_mb+'MB · r'+(a.restarts||0)+'</span>';};
+  const mainUp = s.remoteMain && s.deployed && s.remoteMain!==s.deployed;
+  const devUp = s.remoteDev && s.devDeployed && s.remoteDev!==s.devDeployed;
+  document.getElementById("overview").innerHTML=[
+    ['主站已部署',(s.deployed||"—").slice(0,10)+(mainUp?' <span class="pill warn">有新版本</span>':'')],
+    ['主站远端',(s.remoteMain||"—").slice(0,10)+' <span class="muted">'+esc(s.branchMain||"main")+'</span>'],
+    ['dev 已部署',(s.devDeployed||"—").slice(0,10)+(devUp?' <span class="pill warn">有新版本</span>':'')],
+    ['工作区 HEAD',esc(s.gitHead||"—")],
+    ['更新进行中',s.updateRunning?'<span class="pill warn">进行中</span>':'<span class="pill ok">空闲</span>'],
+    ['后端进程',appPill('samryetha-backend')],
+    ['前端进程',appPill('samryetha-frontend')],
+    ['dev 进程',appPill('samryetha-dev-backend')],
+    ['磁盘',(s.disk&&(s.disk.use_pct||""))+" · 站点 "+(s.disk&&s.disk.root_du||"—")+" · DB "+(s.disk&&s.disk.db_du||"—")],
+    ['服务器时间',esc(s.serverTime||"—")],
+  ].map(([k,v])=>'<div class="stat"><div class="k">'+k+'</div><div class="v">'+v+'</div></div>').join("");
+
+  setToggle("t-main",cfg.main&&cfg.main.enabled!==false);
+  setToggle("t-dev",cfg.dev&&cfg.dev.enabled!==false);
+  document.getElementById("b-main").value=(cfg.main&&cfg.main.branch)||"main";
+  document.getElementById("b-dev").value=(cfg.dev&&cfg.dev.branch)||"dev";
+  document.getElementById("w-hook").value=(cfg.notify&&cfg.notify.webhook)||"";
+
+  const vs=s.rollback||[];
+  const vh=document.getElementById("versions");
+  vh.innerHTML=vs.length
+    ? vs.map(v=>'<div class="ver"><code>'+esc(v.sha.slice(0,12))+'</code><span class="muted">'+fmtTime(v.mtime)+'</span><button class="btn danger" data-sha="'+esc(v.sha)+'">回滚到此版本</button></div>').join("")
+    : '<div class="muted">暂无可回滚版本</div>';
+  vh.querySelectorAll('button[data-sha]').forEach(b=>b.addEventListener("click",()=>doRollback(b.dataset.sha)));
+
+  const bk=s.backups||[];
+  document.getElementById("backups").innerHTML=bk.length
+    ? bk.map(b=>'<tr><td>'+esc(b.name)+'</td><td class="muted">'+fmtTime(b.mtime)+'</td></tr>').join("")
+    : '<tr><td colspan="2" class="muted">暂无备份</td></tr>';
+
+  const gl=s.gitLog||[];
+  document.getElementById("gitlog").innerHTML=gl.length
+    ? gl.map(c=>'<div class="commit"><code>'+esc(c.sha)+'</code><span>'+esc(c.subject||"")+'</span></div>').join("")
+    : '<div class="muted">无</div>';
+
+  const ac=s.actions||[];
+  document.getElementById("actions").innerHTML=ac.length
+    ? ac.map(a=>'<tr><td class="muted">'+fmtTime(a.ts)+'</td><td>'+esc(a.email)+'</td><td>'+esc(a.action)+'</td><td class="muted">'+esc(a.detail||"")+'</td></tr>').join("")
+    : '<tr><td colspan="4" class="muted">暂无记录</td></tr>';
+}
+
+async function load(){
+  const s=await api("/api/update/state");
+  render(s);
+  if(!document.getElementById("log").dataset.loaded) { await loadLog(); }
+}
+
+async function loadLog(){
+  const f=document.getElementById("log-file").value;
+  const t=await api("/api/update/log?file="+encodeURIComponent(f)+"&lines=300");
+  const el=document.getElementById("log");
+  el.textContent=t||"(空)"; el.dataset.loaded="1";
+}
+
+async function save(){
+  const body={main:{enabled:isOn("t-main"),branch:document.getElementById("b-main").value.trim()||"main"},
+    dev:{enabled:isOn("t-dev"),branch:document.getElementById("b-dev").value.trim()||"dev"},
+    notify:{webhook:document.getElementById("w-hook").value.trim()}};
+  try{await api("/api/update/config",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body)});
+    document.getElementById("save-state").textContent="已保存 "+new Date().toLocaleTimeString();toast("参数已保存");}
+  catch(e){toast("保存失败："+e.message,true);}
+}
+async function doRun(force){
+  document.getElementById("op-state").textContent=force?"已触发强制重新部署…":"已触发更新…";
+  try{await api("/api/update/run",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({force:!!force})});toast(force?"已触发强制部署":"已触发更新");setTimeout(load,1500);}
+  catch(e){document.getElementById("op-state").textContent="";toast("触发失败："+e.message,true);}
+}
+async function doRollback(sha){
+  if(!confirm("确认回滚到 "+sha.slice(0,12)+" ？回滚后更新标记会前移，避免被自动更新覆盖。"))return;
+  try{await api("/api/update/rollback",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({sha})});toast("已触发回滚");setTimeout(load,1500);}
+  catch(e){toast("回滚失败："+e.message,true);}
+}
+async function simple(path,label,body){
+  document.getElementById("op-state").textContent=label+"…";
+  try{const r=await api(path,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})});document.getElementById("op-state").textContent=label+"完成";toast(label+"完成");setTimeout(load,1200);return r;}
+  catch(e){document.getElementById("op-state").textContent="";toast(label+"失败："+e.message,true);}
+}
+["t-main","t-dev"].forEach(bindToggle);
+document.getElementById("save").addEventListener("click",save);
+document.getElementById("run").addEventListener("click",()=>doRun(false));
+document.getElementById("run-force").addEventListener("click",()=>{if(confirm("强制重新部署远端最新（即使标记已是最新）？"))doRun(true);});
+document.getElementById("regen").addEventListener("click",()=>simple("/api/update/status-regen","重新生成状态页"));
+document.getElementById("codecheck").addEventListener("click",()=>simple("/api/update/codecheck","运行代码体检"));
+document.getElementById("backup").addEventListener("click",()=>simple("/api/update/backup","备份数据库"));
+document.getElementById("restart").addEventListener("click",()=>{const app=document.getElementById("restart-app").value;if(confirm("确认重启 "+app+" ？"))simple("/api/update/restart","重启 "+app,{app});});
+document.getElementById("test-hook").addEventListener("click",()=>simple("/api/update/notify-test","发送测试告警"));
+document.getElementById("log-refresh").addEventListener("click",()=>loadLog().then(()=>toast("日志已刷新")).catch(e=>toast(e.message,true)));
+document.getElementById("log-file").addEventListener("change",()=>loadLog().catch(e=>toast(e.message,true)));
+load().then(connectWS).catch(e=>{toast("加载失败："+e.message,true);connectWS();});
+// WS 断开时用轮询兜底；连上后由 WS 推送（不再定时轮询）
+setInterval(()=>{if(!wsAlive)load().catch(()=>{});},5000);
+</script>
+</body>
+</html>
