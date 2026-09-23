@@ -605,6 +605,22 @@ function analyzerSecrets() {
   return findings;
 }
 
+// ---------- 分析器 6：语义检查（静默失败 / 静默失效） ----------
+// 交给独立的 semantic-checks.mjs（同目录），它基于 TypeScript AST 做跨函数分析：
+//   - 用户可见的写操作被 .catch(()=>undefined) 静默吞掉
+//   - 无内部保护的 async 函数在未受保护的调用点被调用（会产生 unhandled rejection）
+//   - 配置静默降级（import.meta.env?.X / ?? ""）
+// 只报高置信度发现，避免变成噪音。
+async function analyzerSemantic() {
+  const script = path.join(ROOT, "status", "semantic-checks.mjs");
+  if (!fs.existsSync(script)) throw new Error("semantic-checks.mjs not found; skipped");
+  if (!hasAnalysis()) throw new Error("analysis/node_modules not found; skipped");
+  const res = await runChild("node", [script, "--json"], { env: { ...process.env, SAMRYETHA_ROOT: ROOT } });
+  if (res.timedOut) throw new Error(`timeout after ${TIMEOUT_MS}ms`);
+  const arr = parseJsonArray(res.stdout);
+  return arr.map((f) => normalizeFinding({ ...f, analyzer: "semantic" }, "semantic"));
+}
+
 // ---------- 分析器调度：独立 try/catch + 计时 ----------
 async function runAnalyzer(name, fn) {
   const t0 = Date.now();
@@ -648,6 +664,7 @@ async function main() {
     ["ast", analyzerAst],
     ["python", analyzerPython],
     ["secrets", analyzerSecrets],
+    ["semantic", analyzerSemantic],
   ];
 
   const results = [];
