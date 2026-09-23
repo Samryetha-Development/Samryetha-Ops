@@ -30,7 +30,9 @@ permissions:
   contents: write
 
 env:
-  SKIP_PATTERN: "\\[skip release\\]"
+  # 只在提交信息首行匹配，避免描述里提到标记时被误判
+  # （曾因提交信息里解释规则本身包含 "[skip release]" 而漏发版本）
+  SKIP_TOKEN: "!release-skip"
 
 jobs:
   build:
@@ -103,21 +105,23 @@ jobs:
       - name: Decide version
         id: ver
         run: |
-          msg="$(git log -1 --pretty=%B)"
-          if echo "$msg" | grep -qE "$SKIP_PATTERN"; then
+          # 只看首行：正文里解释发布规则不该影响是否发布
+          subject="$(git log -1 --pretty=%s)"
+          if printf '%s' "$subject" | grep -qF "$SKIP_TOKEN"; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
-            echo "提交信息含 [skip release]，不发布"
+            echo "首行含 $SKIP_TOKEN，不发布"
             exit 0
           fi
           latest="$(git tag -l 'v*' --sort=-v:refname | head -1)"
           base="${latest:-v0.0.0}"; base="${base#v}"
           IFS=. read -r MA MI PA <<< "$base"
           MA=${MA:-0}; MI=${MI:-0}; PA=${PA:-0}
-          if echo "$msg" | grep -q '\[major\]'; then MA=$((MA+1)); MI=0; PA=0
-          elif echo "$msg" | grep -q '\[minor\]'; then MI=$((MI+1)); PA=0
+          if printf '%s' "$subject" | grep -qF '[major]'; then MA=$((MA+1)); MI=0; PA=0
+          elif printf '%s' "$subject" | grep -qF '[minor]'; then MI=$((MI+1)); PA=0
           else PA=$((PA+1)); fi
           echo "version=v${MA}.${MI}.${PA}" >> "$GITHUB_OUTPUT"
           echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "首行: $subject"
           echo "上一版 ${latest:-无} → 本次 v${MA}.${MI}.${PA}"
 
       - name: Tag
