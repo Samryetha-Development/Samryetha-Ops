@@ -4,24 +4,33 @@ name: Build update-service
 # 在这里交叉编译出 linux/amd64 产物并作为 Release 附件发布，
 # 这样生产服务器无需安装 Go —— ops_self_update.sh 直接下载即可。
 #
-# 触发：
-#   - push 到 main 且改动 update-service/ → 构建校验 + 上传 artifact
-#   - 打 tag（v*）→ 额外发布 Release，服务器据此拉取
+# 发布流程（自动打 tag，不再手工选版本号）：
+#   1. push main → 构建 + 冒烟测试（必须全绿）
+#   2. 冒烟通过后，由 release job 依据提交信息自动决定版本号并打 tag
+#   3. tag 触发的同一次运行里上传 Release 附件
+#
+# 版本号规则（读最新 vX.Y.Z tag，按提交信息决定）：
+#   [major]  → X+1.0.0
+#   [minor]  → X.Y+1.0
+#   其它     → X.Y.Z+1
+#   [skip release] → 不发布
+#
+# 这样服务器始终拉 releases/latest 即可，版本序列连续且可追溯。
 
 on:
   push:
     branches: [main]
-    paths:
-      - "update-service/**"
-      - ".github/workflows/build-update-service.yml"
-    tags: ["v*"]
   pull_request:
     paths:
       - "update-service/**"
+      - ".github/workflows/build-update-service.yml"
   workflow_dispatch:
 
 permissions:
   contents: write
+
+env:
+  SKIP_PATTERN: "\\[skip release\\]"
 
 jobs:
   build:
@@ -55,7 +64,6 @@ jobs:
 
       - name: Smoke test (starts and serves /healthz)
         run: |
-          # 密钥与配置用临时值，只验证二进制能起来并响应
           tmp=$(mktemp -d)
           mkdir -p "$tmp/status"
           head -c 48 /dev/urandom | base64 | tr -d '\n' > "$tmp/status/.service-secret"
@@ -76,11 +84,56 @@ jobs:
             update-service/dist/update-service
             update-service/dist/update-service.sha256
 
+  # 构建通过后才发布。只在 main 上跑，PR 不发布。
+  release:
+    name: Tag + Release
+    needs: build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: update-service-linux-amd64
+          path: dist
+
+      - name: Decide version
+        id: ver
+        run: |
+          msg="$(git log -1 --pretty=%B)"
+          if echo "$msg" | grep -qE "$SKIP_PATTERN"; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "提交信息含 [skip release]，不发布"
+            exit 0
+          fi
+          latest="$(git tag -l 'v*' --sort=-v:refname | head -1)"
+          base="${latest:-v0.0.0}"; base="${base#v}"
+          IFS=. read -r MA MI PA <<< "$base"
+          MA=${MA:-0}; MI=${MI:-0}; PA=${PA:-0}
+          if echo "$msg" | grep -q '\[major\]'; then MA=$((MA+1)); MI=0; PA=0
+          elif echo "$msg" | grep -q '\[minor\]'; then MI=$((MI+1)); PA=0
+          else PA=$((PA+1)); fi
+          echo "version=v${MA}.${MI}.${PA}" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "上一版 ${latest:-无} → 本次 v${MA}.${MI}.${PA}"
+
+      - name: Tag
+        if: steps.ver.outputs.skip == 'false'
+        run: |
+          v="${{ steps.ver.outputs.version }}"
+          git tag "$v"
+          git push origin "$v"
+
       - name: Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: steps.ver.outputs.skip == 'false'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.ver.outputs.version }}
+          name: ${{ steps.ver.outputs.version }}
           files: |
-            update-service/dist/update-service
-            update-service/dist/update-service.sha256
+            dist/update-service
+            dist/update-service.sha256
           generate_release_notes: true

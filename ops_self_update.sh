@@ -17,6 +17,8 @@ set -uo pipefail
 
 ROOT="${SAMRYETHA_ROOT:-/opt/Samryetha}"
 OPS_REPO="${OPS_REPO:-https://github.com/Samryetha-Development/Samryetha-Ops.git}"
+# owner/repo slug：剥掉 URL 前缀与 .git 后缀（漏剥会让 release 下载 404）
+OPS_SLUG="$(printf '%s' "$OPS_REPO" | sed -E 's#^https?://github\.com/##; s#\.git$##')"
 LOG_DIR="$ROOT/logs"
 LOG_FILE="$LOG_DIR/ops-update.log"
 MARKER="$LOG_DIR/.last-deployed-ops"
@@ -34,31 +36,40 @@ FORCE=0
 [ "${1:-}" = "--force" ] && FORCE=1
 
 if [ "${1:-}" = "--status" ]; then
-  REMOTE=$(git ls-remote "$OPS_REPO" refs/heads/main 2>/dev/null | awk '{print $1}')
+  REL=$(curl -fsSL --max-time 30 \
+    "https://api.github.com/repos/$OPS_SLUG/releases/latest" 2>/dev/null \
+    | python3 -c 'import json,sys
+try: print(json.load(sys.stdin).get("tag_name",""))
+except Exception: print("")' 2>/dev/null)
   LAST=""; [ -f "$MARKER" ] && LAST=$(cat "$MARKER")
-  echo "ops 远端:   ${REMOTE:-未知}"
-  echo "ops 已部署: ${LAST:-无记录}"
-  [ -n "$REMOTE" ] && [ "$REMOTE" != "$LAST" ] && echo "=> 有可用更新" || echo "=> 已是最新"
+  echo "ops 最新发布: ${REL:-未知}"
+  echo "ops 已部署:   ${LAST:-无记录}"
+  [ -n "$REL" ] && [ "$REL" != "$LAST" ] && echo "=> 有可用更新" || echo "=> 已是最新"
   echo "服务: $(systemctl is-active "$SVC" 2>/dev/null || echo unknown)"
   exit 0
 fi
 
+# 版本判定：以最新 Release 的 tag 为准，而不是 git HEAD。
+# 理由：CI 的 release job 只在「构建+冒烟全绿」后才打 tag；仓库里可能存在
+# 尚未发布的提交。以 HEAD 判断会导致反复更新到没有产物可用的版本。
 log "==> 检查 ops 更新"
-if ! REMOTE=$(git ls-remote "$OPS_REPO" refs/heads/main 2>>"$LOG_FILE" | awk '{print $1}'); then
-  log "[fail] 无法获取 ops 仓库（网络/认证），跳过"
-  exit 1
-fi
-if [ -z "$REMOTE" ]; then
-  log "[fail] ops 仓库返回空 ref（认证或仓库异常），跳过"
+RELEASE_JSON=$(curl -fsSL --max-time 30 \
+  "https://api.github.com/repos/${OPS_SLUG:-Samryetha-Development/Samryetha-Ops}/releases/latest" 2>>"$LOG_FILE") || RELEASE_JSON=""
+REMOTE=$(printf '%s' "$RELEASE_JSON" | python3 -c \
+  'import json,sys
+try: print(json.load(sys.stdin).get("tag_name",""))
+except Exception: print("")' 2>/dev/null)
+if [ -z "$REMOTE" ] && [ -n "$RELEASE_JSON" ]; then
+  log "[fail] 无法解析 Release 信息，跳过"
   exit 1
 fi
 
 LAST=""; [ -f "$MARKER" ] && LAST=$(cat "$MARKER")
 if [ "$REMOTE" = "$LAST" ] && [ "$FORCE" != "1" ]; then
-  log "[ok] ops 已是最新 (${REMOTE:0:10})"
+  log "[ok] ops 已是最新 (${REMOTE:-未知})"
   exit 0
 fi
-log "==> 发现新版本 ${REMOTE:0:10}（当前 ${LAST:0:10}），开始更新"
+log "==> 发现新版本 ${REMOTE:-未知}（当前 ${LAST:-无}），开始更新"
 
 if ! TMP=$(mktemp -d "$ROOT/.opsbuild-XXXXXX"); then
   log "[fail] 无法创建临时目录"
@@ -89,9 +100,7 @@ mkdir -p "$SVC_STAGE"
 cp "$SVC_SRC/admin.html" "$SVC_STAGE/" 2>/dev/null || true
 
 # 1) 从 Release 附件下载（最优：服务器零 Go 依赖，且产物已在 CI 冒烟过）
-# 从 Release 下载预编译产物。注意 OPS_REPO 末尾带 .git，必须剥掉，
-# 否则拼出 .../Samryetha-Ops.git/releases/... 会 404。
-OPS_SLUG="$(printf '%s' "$OPS_REPO" | sed -E 's#^https?://github\.com/##; s#\.git$##')"
+# 从 Release 下载预编译产物（OPS_SLUG 已在文件顶部定义）
 LATEST_BIN_URL="https://github.com/${OPS_SLUG}/releases/latest/download/update-service"
 download_binary() {
   local url="$1" out="$2"
