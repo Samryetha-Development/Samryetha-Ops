@@ -309,7 +309,9 @@ func (c *Config) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 // ---------------------------------------------------------------- 审计
 
-func (c *Config) auditPath() string { return filepath.Join(c.Root, "status", "data", "admin-actions.jsonl") }
+func (c *Config) auditPath() string {
+	return filepath.Join(c.Root, "status", "data", "admin-actions.jsonl")
+}
 
 func (c *Config) audit(email, action, detail string) {
 	rec, _ := json.Marshal(map[string]any{"ts": time.Now().Unix(), "email": email, "action": action, "detail": detail})
@@ -342,7 +344,9 @@ func (c *Config) auditList(n int) []map[string]any {
 
 // ---------------------------------------------------------------- 数据
 
-func (c *Config) updateConfigPath() string { return filepath.Join(c.Root, "status", "update-config.json") }
+func (c *Config) updateConfigPath() string {
+	return filepath.Join(c.Root, "status", "update-config.json")
+}
 
 func (c *Config) readConfig() map[string]any { return readJSONMap(c.updateConfigPath()) }
 
