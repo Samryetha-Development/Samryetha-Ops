@@ -44,8 +44,14 @@ if [ "${1:-}" = "--status" ]; then
 fi
 
 log "==> 检查 ops 更新"
-REMOTE=$(git ls-remote "$OPS_REPO" refs/heads/main 2>>"$LOG_FILE" | awk '{print $1}')
-[ -z "$REMOTE" ] && fail "无法获取 ops 仓库（网络/认证），跳过" && exit 1
+if ! REMOTE=$(git ls-remote "$OPS_REPO" refs/heads/main 2>>"$LOG_FILE" | awk '{print $1}'); then
+  log "[fail] 无法获取 ops 仓库（网络/认证），跳过"
+  exit 1
+fi
+if [ -z "$REMOTE" ]; then
+  log "[fail] ops 仓库返回空 ref（认证或仓库异常），跳过"
+  exit 1
+fi
 
 LAST=""; [ -f "$MARKER" ] && LAST=$(cat "$MARKER")
 if [ "$REMOTE" = "$LAST" ] && [ "$FORCE" != "1" ]; then
@@ -54,7 +60,10 @@ if [ "$REMOTE" = "$LAST" ] && [ "$FORCE" != "1" ]; then
 fi
 log "==> 发现新版本 ${REMOTE:0:10}（当前 ${LAST:0:10}），开始更新"
 
-TMP=$(mktemp -d "$ROOT/.opsbuild-XXXXXX") || fail "无法创建临时目录" && exit 1
+if ! TMP=$(mktemp -d "$ROOT/.opsbuild-XXXXXX"); then
+  log "[fail] 无法创建临时目录"
+  exit 1
+fi
 if ! git clone --depth 1 --branch main "$OPS_REPO" "$TMP" >> "$LOG_FILE" 2>&1; then
   fail "克隆 ops 仓库失败"
   exit 1
@@ -80,7 +89,10 @@ mkdir -p "$SVC_STAGE"
 cp "$SVC_SRC/admin.html" "$SVC_STAGE/" 2>/dev/null || true
 
 # 1) 从 Release 附件下载（最优：服务器零 Go 依赖，且产物已在 CI 冒烟过）
-LATEST_BIN_URL="https://github.com/${OPS_REPO#https://github.com/}/releases/latest/download/update-service"
+# 从 Release 下载预编译产物。注意 OPS_REPO 末尾带 .git，必须剥掉，
+# 否则拼出 .../Samryetha-Ops.git/releases/... 会 404。
+OPS_SLUG="$(printf '%s' "$OPS_REPO" | sed -E 's#^https?://github\.com/##; s#\.git$##')"
+LATEST_BIN_URL="https://github.com/${OPS_SLUG}/releases/latest/download/update-service"
 download_binary() {
   local url="$1" out="$2"
   curl -fsSL --max-time 120 "$url" -o "$out" 2>>"$LOG_FILE" || return 1
@@ -135,12 +147,32 @@ if [ "${SKIP_SVC:-0}" != "1" ] && [ -f "$SVC_STAGE/update-service" ]; then
   [ -f "$SVC_STAGE/admin.html" ] && install_file "$SVC_STAGE/admin.html" "$STATUS_DIR/update-service/admin.html" 644
   [ -f "$SVC_SRC/main.go" ] && install_file "$SVC_SRC/main.go" "$STATUS_DIR/update-service/main.go" 644
   [ -f "$SVC_SRC/go.mod" ] && install_file "$SVC_SRC/go.mod" "$STATUS_DIR/update-service/go.mod" 644
-  # systemd 单元变了才重装
-  if [ -f "$SVC_SRC/samryetha-status.service" ] && \
-     ! cmp -s "$SVC_SRC/samryetha-status.service" /etc/systemd/system/samryetha-status.service 2>/dev/null; then
-    sudo -n cp "$SVC_SRC/samryetha-status.service" /etc/systemd/system/samryetha-status.service
-    sudo -n systemctl daemon-reload
-    log "[..] systemd 单元已更新"
+  # systemd 单元：用仓库版本作为模板，但**保留本机已有的 Environment= 行**。
+  # 生产凭据（ADMIN_SUBS 等）不该进仓库；直接覆盖会把本机配置抹掉（曾导致
+  # sub 白名单被清空、登录判定退回邮箱）。做法：以仓库单元为骨架，
+  # 把现有单元里独有的 Environment= 行追加回去。
+  if [ -f "$SVC_SRC/samryetha-status.service" ]; then
+    CUR=/etc/systemd/system/samryetha-status.service
+    if [ -f "$CUR" ] && ! cmp -s "$SVC_SRC/samryetha-status.service" "$CUR"; then
+      MERGED="$(mktemp)"
+      EXTRA="$(mktemp)"
+      # 只保留「仓库模板里没有的」Environment 键，避免重复定义。
+      grep -E '^Environment=[A-Za-z_][A-Za-z0-9_]*=' "$CUR" 2>/dev/null | sort -u | while read -r line; do
+        key="${line#Environment=}"; key="${key%%=*}"
+        grep -qE "^Environment=${key}=" "$SVC_SRC/samryetha-status.service" || printf '%s\n' "$line"
+      done > "$EXTRA"
+      # 以仓库模板为骨架；把本机独有项插到 [Service] 段末尾
+      awk -v extra="$EXTRA" '
+        BEGIN { while ((getline l < extra) > 0) ex[++n] = l }
+        /^\[/ { if (insection && !done) { for (i=1;i<=n;i++) print ex[i]; done=1 } insection = ($0=="[Service]") }
+        { print }
+        END { if (insection && !done) for (i=1;i<=n;i++) print ex[i] }
+      ' "$SVC_SRC/samryetha-status.service" > "$MERGED"
+      sudo -n cp "$MERGED" "$CUR"
+      rm -f "$MERGED" "$EXTRA"
+      sudo -n systemctl daemon-reload
+      log "[..] systemd 单元已更新（本机独有 Environment 已保留在 [Service] 段）"
+    fi
   fi
   sudo -n systemctl start "$SVC" >> "$LOG_FILE" 2>&1 || true
 fi
