@@ -48,7 +48,8 @@ type Config struct {
 	Issuer      string
 	ClientID    string
 	RedirectURI string
-	Admins      map[string]bool
+	Admins      map[string]bool // 允许的邮箱（兼容/辅助）
+	AdminSubs   map[string]bool // 允许的 Lako 用户 UUID（sub）——主凭据，不可变
 	Secret      []byte
 }
 
@@ -72,6 +73,14 @@ func loadConfig() (*Config, error) {
 			admins[e] = true
 		}
 	}
+	// sub 白名单（首选）：Lako 的用户 UUID，登录后不可变，攻击者无法通过注册同邮箱冒充。
+	subs := map[string]bool{}
+	for _, s := range strings.Split(env("ADMIN_SUBS", ""), ",") {
+		s = strings.TrimSpace(s)
+		if s != "" {
+			subs[s] = true
+		}
+	}
 	return &Config{
 		Listen:      env("LISTEN", "127.0.0.1:3030"),
 		Root:        root,
@@ -80,6 +89,7 @@ func loadConfig() (*Config, error) {
 		ClientID:    env("OIDC_CLIENT_ID", "samryetha-status"),
 		RedirectURI: env("OIDC_REDIRECT_URI", "https://status.samryetha.com/update/callback"),
 		Admins:      admins,
+		AdminSubs:   subs,
 		Secret:      []byte(strings.TrimSpace(string(secret))),
 	}, nil
 }
@@ -214,10 +224,27 @@ func (c *Config) guard(w http.ResponseWriter, r *http.Request) *session {
 	if s == nil {
 		return nil
 	}
-	if r.Method != http.MethodGet && !c.requireCSRF(w, r) {
+	// 所有写操作必须 POST + CSRF。早先的实现对 GET 跳过 CSRF，而路由未限定方法，
+	// 导致 GET /api/update/run 之类可被外部链接诱导触发（CSRF）。现在一律要求 POST。
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return nil
+	}
+	if !c.requireCSRF(w, r) {
 		return nil
 	}
 	return s
+}
+
+// guardRead 用于只读接口：仅要求已登录，不限制方法、不要 CSRF。
+func (c *Config) guardRead(w http.ResponseWriter, r *http.Request) *session {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"error": "method not allowed"})
+		return nil
+	}
+	return c.requireAuth(w, r)
 }
 
 // ---------------------------------------------------------------- OAuth
@@ -287,17 +314,42 @@ func (c *Config) handleCallback(w http.ResponseWriter, r *http.Request) {
 	ubody, _ := io.ReadAll(io.LimitReader(uresp.Body, 1<<20))
 	var info map[string]any
 	_ = json.Unmarshal(ubody, &info)
+	sub, _ := info["sub"].(string)
+	sub = strings.TrimSpace(sub)
 	email, _ := info["email"].(string)
 	email = strings.ToLower(strings.TrimSpace(email))
-	if email == "" || !c.Admins[email] {
-		http.Error(w, "forbidden: "+email+" is not an update admin", http.StatusForbidden)
+	emailVerified, _ := info["email_verified"].(bool)
+
+	// 授权判定（两种凭据，满足其一）：
+	//   1) sub 命中 ADMIN_SUBS —— 首选。sub 是 Lako 的用户 UUID，创建后不可变，
+	//      且不可被他人注册冒充。生产应配置此项。
+	//   2) 邮箱命中 ADMIN_EMAIL —— 仅作兼容/回退，且必须 email_verified=true，
+	//      否则任何人注册一个未验证的同名邮箱即可取得运维权限。
+	authorized := false
+	reason := "not in allowlist"
+	if sub != "" && c.AdminSubs[sub] {
+		authorized = true
+	} else if email != "" && c.Admins[email] {
+		if emailVerified {
+			authorized = true
+		} else {
+			reason = "email is not verified and sub is not allowlisted"
+		}
+	}
+	if !authorized {
+		ident := email
+		if ident == "" {
+			ident = "(no email)"
+		}
+		c.audit(email, "login_denied", "sub="+sub+" "+reason)
+		http.Error(w, "forbidden: "+ident+" is not an update admin ("+reason+")", http.StatusForbidden)
 		return
 	}
 	setCookie(w, "sess", c.makeSession(email), 8*3600)
 	setCookie(w, "csrf", randToken(24), 8*3600)
 	clearCookie(w, "st")
 	clearCookie(w, "pk")
-	c.audit(email, "login", "")
+	c.audit(email, "login", "sub="+sub)
 	http.Redirect(w, r, "/update/", http.StatusFound)
 }
 
@@ -752,7 +804,7 @@ var logFiles = map[string]string{
 }
 
 func (c *Config) handleLog(w http.ResponseWriter, r *http.Request) {
-	if c.requireAuth(w, r) == nil {
+	if c.guardRead(w, r) == nil {
 		return
 	}
 	rel := logFiles[r.URL.Query().Get("file")]
@@ -949,7 +1001,7 @@ func (c *Config) handler() http.Handler {
 	})
 	mux.HandleFunc("/update", c.handleLogin)
 	mux.HandleFunc("/api/update/state", func(w http.ResponseWriter, r *http.Request) {
-		if c.requireAuth(w, r) == nil {
+		if c.guardRead(w, r) == nil {
 			return
 		}
 		writeJSON(w, 200, c.stateJSON())
@@ -975,7 +1027,8 @@ func main() {
 		os.Exit(1)
 	}
 	srv := &http.Server{Addr: cfg.Listen, Handler: cfg.handler(), ReadHeaderTimeout: 10 * time.Second}
-	fmt.Printf("samryetha-status on %s (issuer %s, admins %v)\n", cfg.Listen, cfg.Issuer, cfg.Admins)
+	fmt.Printf("samryetha-status on %s (issuer %s, admins %v, subs %v)\n",
+		cfg.Listen, cfg.Issuer, cfg.Admins, cfg.AdminSubs)
 	if err := srv.ListenAndServe(); err != nil {
 		fmt.Fprintln(os.Stderr, "server error:", err)
 		os.Exit(1)
