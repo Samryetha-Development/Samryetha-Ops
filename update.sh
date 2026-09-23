@@ -1345,6 +1345,22 @@ else
   DEV_RC=0
 fi
 
+# ---- ops 自更新（更新站自身：状态页 + 更新控制台）----
+# 放在最后：即使主站/dev 更新失败，运维组件也应保持最新可用（它正是恢复手段）。
+# 自身失败不影响主站结论，只记录退出码。
+OPS_RC=0
+if [ "$(config_get ops.enabled true)" = "true" ]; then
+  OPS_SCRIPT="$ROOT/ops_self_update.sh"
+  if [ -f "$OPS_SCRIPT" ]; then
+    if ! bash "$OPS_SCRIPT" >> "$LOG_FILE" 2>&1; then
+      log "[fail] ops 自更新失败（不影响主站）；详见 ops-update.log"
+      OPS_RC=1
+    fi
+  fi
+else
+  log "[skip] ops 自更新已在后台暂停"
+fi
+
 if [ "$MAIN_RC" -ne 0 ] || [ "$DEV_RC" -ne 0 ]; then
   exit 1
 fi

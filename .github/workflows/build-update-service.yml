@@ -1,0 +1,86 @@
+name: Build update-service
+
+# update-service 是 Go 单静态二进制（零第三方依赖）。
+# 在这里交叉编译出 linux/amd64 产物并作为 Release 附件发布，
+# 这样生产服务器无需安装 Go —— ops_self_update.sh 直接下载即可。
+#
+# 触发：
+#   - push 到 main 且改动 update-service/ → 构建校验 + 上传 artifact
+#   - 打 tag（v*）→ 额外发布 Release，服务器据此拉取
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "update-service/**"
+      - ".github/workflows/build-update-service.yml"
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - "update-service/**"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (linux/amd64)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: update-service
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: update-service/go.sum
+
+      - name: Verify (gofmt + vet)
+        run: |
+          test -z "$(gofmt -l .)" || { echo "gofmt 有未格式化文件:"; gofmt -l .; exit 1; }
+          go vet ./...
+
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          go build -trimpath -ldflags "-s -w" -o dist/update-service .
+          file dist/update-service
+          sha256sum dist/update-service > dist/update-service.sha256
+
+      - name: Smoke test (starts and serves /healthz)
+        run: |
+          # 密钥与配置用临时值，只验证二进制能起来并响应
+          tmp=$(mktemp -d)
+          mkdir -p "$tmp/status"
+          head -c 48 /dev/urandom | base64 | tr -d '\n' > "$tmp/status/.service-secret"
+          SAMRYETHA_ROOT="$tmp" LISTEN=127.0.0.1:3030 OIDC_ISSUER=https://example.invalid \
+            ./dist/update-service & pid=$!
+          for i in $(seq 1 10); do
+            curl -fsS -o /dev/null http://127.0.0.1:3030/healthz && break || sleep 0.5
+          done
+          code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3030/healthz || true)
+          kill "$pid" 2>/dev/null || true
+          [ "$code" = "200" ] || { echo "healthz 未返回 200（got $code）"; exit 1; }
+          echo "smoke ok"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: update-service-linux-amd64
+          path: |
+            update-service/dist/update-service
+            update-service/dist/update-service.sha256
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            update-service/dist/update-service
+            update-service/dist/update-service.sha256
+          generate_release_notes: true
