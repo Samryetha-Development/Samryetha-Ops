@@ -269,11 +269,9 @@ func (s *Service) rollback(ctx context.Context, cx *drivers.Context, p Plan, src
 			_ = proc.Reload(cx)
 		}
 	}
-	res := s.finish(out, start, "rolled_back", cause)
-	_, _ = s.K.Emit("deployment.rolled_back", map[string]any{
-		"target": p.ID, "from": out.From, "to": out.To, "cause": cause,
-	})
-	return res
+	// 注意：不要在这里额外 Emit——finish() 会按 state 发出完整事件。
+	// 早前这里多发了一次字段不全的事件，导致事件流里出现 state/duration 为空的条目。
+	return s.finish(out, start, "rolled_back", cause)
 }
 
 func (s *Service) finish(out Outcome, start time.Time, state, errMsg string) Outcome {
@@ -341,7 +339,35 @@ func (s *Service) checkHealth(cx *drivers.Context, h drivers.HealthSpec) error {
 	if !ok {
 		return fmt.Errorf("health driver %q not registered", h.Type)
 	}
-	return drv.Check(cx, h)
+	// 必须重试：服务重启后需要时间就绪（实测 dev 后端启动要数秒）。立即探活会把
+	// "还没起来"误判为"部署失败"并触发不必要的回滚——旧 update.sh 用 12×3s 窗口，
+	// 这里保持同等语义，并允许通过 config 覆盖。
+	attempts, interval := 12, 3*time.Second
+	if cfg, err := s.K.ConfigGet("deployer.health_retry"); err == nil {
+		if m, ok := cfg.(map[string]any); ok {
+			if v, ok := m["attempts"].(float64); ok && v > 0 {
+				attempts = int(v)
+			}
+			if v, ok := m["interval_seconds"].(float64); ok && v > 0 {
+				interval = time.Duration(v) * time.Second
+			}
+		}
+	}
+	var last error
+	for i := 1; i <= attempts; i++ {
+		if err := drv.Check(cx, h); err == nil {
+			if i > 1 {
+				cx.Log("info", fmt.Sprintf("health ok after %d attempts", i), nil)
+			}
+			return nil
+		} else {
+			last = err
+		}
+		if i < attempts {
+			time.Sleep(interval)
+		}
+	}
+	return fmt.Errorf("after %d attempts: %w", attempts, last)
 }
 
 func firstWord(s string) string {

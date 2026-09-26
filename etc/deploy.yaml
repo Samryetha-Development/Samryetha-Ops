@@ -123,6 +123,15 @@ targets:
       - "systemctl restart samryetha-status"
     keep: 3
 
+# 部署参数（内核服务的配置，非硬编码）
+deployer:
+  # 健康门重试：服务重启后需要时间就绪——实测 dev 后端启动约 2 秒
+  # （pydantic 做类型检查）。立即探活会把"还没起来"误判为失败并触发回滚。
+  # 旧 update.sh 用 12×3s 的窗口，这里保持同等语义。
+  health_retry:
+    attempts: 12
+    interval_seconds: 3
+
 # 调度：每个目标可独立开关与排期。
 schedule:
   - target: main
