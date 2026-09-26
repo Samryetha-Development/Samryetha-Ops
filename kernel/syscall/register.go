@@ -13,9 +13,13 @@ import (
 	"strings"
 	"time"
 
+	"samryetha/kernel/config"
+	"samryetha/kernel/cron"
 	"samryetha/kernel/events"
+	"samryetha/kernel/fsops"
 	"samryetha/kernel/perm"
 	"samryetha/kernel/proc"
+	"samryetha/kernel/route"
 	"samryetha/kernel/store"
 	"samryetha/kernel/task"
 	"samryetha/kernel/ui"
@@ -29,7 +33,14 @@ type Deps struct {
 	Store  *store.Store
 	Policy *perm.Policy
 	UI     *ui.Shell
-	Log    func(level, msg string, fields map[string]any)
+	// 扩展组件（可空；空则对应调用报 unavailable，而不是静默失败）
+	Config   *config.Tree
+	FS       *fsops.FS
+	Routes   *route.Table
+	Cron     *cron.Scheduler
+	LogQuery func(source, q string, limit int) []any
+	Root     string
+	Log      func(level, msg string, fields map[string]any)
 }
 
 // buildComponent 把 JSON 声明转成受限组件（只认白名单字段，防止任意结构穿透）。
@@ -80,24 +91,10 @@ func buildComponent(m map[string]any) ui.Component {
 // Register 构建 syscall 表。
 func Register(d Deps) Table {
 	t := Table{}
-	allow := func(call Call, args map[string]any) *CallError {
-		need, ok := CallPermissions[call.Name]
-		if !ok {
-			return &CallError{Code: "unknown_call", Message: call.Name}
-		}
-		if need == "" {
-			return nil
-		}
-		if !d.Policy.Allows(d.Policy.RoleOf(call.Caller.Subject), string(need)) {
-			return &CallError{Code: "denied",
-				Message: fmt.Sprintf("role %s lacks %s", d.Policy.RoleOf(call.Caller.Subject), need)}
-		}
-		return nil
-	}
 
 	// ---- 日志 ----
 	t["log.write"] = func(ctx context.Context, c Call) (map[string]any, *CallError) {
-		if e := allow(c, c.Args); e != nil {
+		if e := allow(d, c, c.Args); e != nil {
 			return nil, e
 		}
 		level := str(c.Args["level"], "info")
@@ -108,7 +105,7 @@ func Register(d Deps) Table {
 
 	// ---- 事件 ----
 	t["event.emit"] = func(ctx context.Context, c Call) (map[string]any, *CallError) {
-		if e := allow(c, c.Args); e != nil {
+		if e := allow(d, c, c.Args); e != nil {
 			return nil, e
 		}
 		topic := str(c.Args["topic"], "")
@@ -121,7 +118,7 @@ func Register(d Deps) Table {
 		return map[string]any{"id": env.ID}, nil
 	}
 	t["event.history"] = func(ctx context.Context, c Call) (map[string]any, *CallError) {
-		if e := allow(c, c.Args); e != nil {
+		if e := allow(d, c, c.Args); e != nil {
 			return nil, e
 		}
 		topic := str(c.Args["topic"], "")
@@ -132,7 +129,7 @@ func Register(d Deps) Table {
 
 	// ---- 存储 ----
 	t["store.get"] = func(ctx context.Context, c Call) (map[string]any, *CallError) {
-		if e := allow(c, c.Args); e != nil {
+		if e := allow(d, c, c.Args); e != nil {
 			return nil, e
 		}
 		v, ok, err := d.Store.Get(c.Caller.Plugin, str(c.Args["key"], ""))
@@ -142,7 +139,7 @@ func Register(d Deps) Table {
 		return map[string]any{"value": v, "found": ok}, nil
 	}
 	t["store.set"] = func(ctx context.Context, c Call) (map[string]any, *CallError) {
-		if e := allow(c, c.Args); e != nil {
+		if e := allow(d, c, c.Args); e != nil {
 			return nil, e
 		}
 		if err := d.Store.Set(c.Caller.Plugin, str(c.Args["key"], ""), str(c.Args["value"], "")); err != nil {
@@ -151,14 +148,14 @@ func Register(d Deps) Table {
 		return map[string]any{}, nil
 	}
 	t["store.del"] = func(ctx context.Context, c Call) (map[string]any, *CallError) {
-		if e := allow(c, c.Args); e != nil {
+		if e := allow(d, c, c.Args); e != nil {
 			return nil, e
 		}
 		_ = d.Store.Del(c.Caller.Plugin, str(c.Args["key"], ""))
 		return map[string]any{}, nil
 	}
 	t["store.list"] = func(ctx context.Context, c Call) (map[string]any, *CallError) {
-		if e := allow(c, c.Args); e != nil {
+		if e := allow(d, c, c.Args); e != nil {
 			return nil, e
 		}
 		keys, err := d.Store.List(c.Caller.Plugin, str(c.Args["prefix"], ""))
@@ -170,7 +167,7 @@ func Register(d Deps) Table {
 
 	// ---- 进程 ----
 	t["proc.spawn"] = func(ctx context.Context, c Call) (map[string]any, *CallError) {
-		if e := allow(c, c.Args); e != nil {
+		if e := allow(d, c, c.Args); e != nil {
 			return nil, e
 		}
 		argv := strSlice(c.Args["argv"])
@@ -193,7 +190,7 @@ func Register(d Deps) Table {
 		return map[string]any{"pid": pid}, nil
 	}
 	t["proc.output"] = func(ctx context.Context, c Call) (map[string]any, *CallError) {
-		if e := allow(c, c.Args); e != nil {
+		if e := allow(d, c, c.Args); e != nil {
 			return nil, e
 		}
 		out, err := d.Procs.Output(int(i64(c.Args["pid"], 0)))
@@ -203,7 +200,7 @@ func Register(d Deps) Table {
 		return map[string]any{"output": out}, nil
 	}
 	t["proc.signal"] = func(ctx context.Context, c Call) (map[string]any, *CallError) {
-		if e := allow(c, c.Args); e != nil {
+		if e := allow(d, c, c.Args); e != nil {
 			return nil, e
 		}
 		if err := d.Procs.Signal(int(i64(c.Args["pid"], 0)), str(c.Args["signal"], "term")); err != nil {
@@ -212,7 +209,7 @@ func Register(d Deps) Table {
 		return map[string]any{}, nil
 	}
 	t["proc.wait"] = func(ctx context.Context, c Call) (map[string]any, *CallError) {
-		if e := allow(c, c.Args); e != nil {
+		if e := allow(d, c, c.Args); e != nil {
 			return nil, e
 		}
 		code, err := d.Procs.Wait(int(i64(c.Args["pid"], 0)), int(i64(c.Args["timeout_ms"], 0)))
@@ -222,7 +219,7 @@ func Register(d Deps) Table {
 		return map[string]any{"code": code}, nil
 	}
 	t["proc.list"] = func(ctx context.Context, c Call) (map[string]any, *CallError) {
-		if e := allow(c, c.Args); e != nil {
+		if e := allow(d, c, c.Args); e != nil {
 			return nil, e
 		}
 		return map[string]any{"procs": d.Procs.List()}, nil
@@ -230,7 +227,7 @@ func Register(d Deps) Table {
 
 	// ---- 任务 ----
 	t["task.submit"] = func(ctx context.Context, c Call) (map[string]any, *CallError) {
-		if e := allow(c, c.Args); e != nil {
+		if e := allow(d, c, c.Args); e != nil {
 			return nil, e
 		}
 		steps := parseSteps(c.Args["steps"])
@@ -241,7 +238,7 @@ func Register(d Deps) Table {
 		return map[string]any{"task_id": id}, nil
 	}
 	t["task.status"] = func(ctx context.Context, c Call) (map[string]any, *CallError) {
-		if e := allow(c, c.Args); e != nil {
+		if e := allow(d, c, c.Args); e != nil {
 			return nil, e
 		}
 		st, ok := d.Tasks.Status(str(c.Args["task_id"], ""))
@@ -251,7 +248,7 @@ func Register(d Deps) Table {
 		return map[string]any{"task": st}, nil
 	}
 	t["task.cancel"] = func(ctx context.Context, c Call) (map[string]any, *CallError) {
-		if e := allow(c, c.Args); e != nil {
+		if e := allow(d, c, c.Args); e != nil {
 			return nil, e
 		}
 		if err := d.Tasks.Cancel(str(c.Args["task_id"], "")); err != nil {
@@ -260,7 +257,7 @@ func Register(d Deps) Table {
 		return map[string]any{}, nil
 	}
 	t["task.list"] = func(ctx context.Context, c Call) (map[string]any, *CallError) {
-		if e := allow(c, c.Args); e != nil {
+		if e := allow(d, c, c.Args); e != nil {
 			return nil, e
 		}
 		return map[string]any{"tasks": d.Tasks.List()}, nil
@@ -268,7 +265,7 @@ func Register(d Deps) Table {
 
 	// ---- UI 声明（外壳按插槽渲染；插件不注入任意 DOM） ----
 	t["ui.declare"] = func(ctx context.Context, c Call) (map[string]any, *CallError) {
-		if e := allow(c, c.Args); e != nil {
+		if e := allow(d, c, c.Args); e != nil {
 			return nil, e
 		}
 		if d.UI == nil {
@@ -300,7 +297,7 @@ func Register(d Deps) Table {
 		return map[string]any{}, nil
 	}
 	t["ui.withdraw"] = func(ctx context.Context, c Call) (map[string]any, *CallError) {
-		if e := allow(c, c.Args); e != nil {
+		if e := allow(d, c, c.Args); e != nil {
 			return nil, e
 		}
 		if d.UI != nil {
@@ -327,8 +324,39 @@ func Register(d Deps) Table {
 		return map[string]any{"hex": hex.EncodeToString(sum[:])}, nil
 	}
 
+	// 扩展调用（config/fs/route/schedule/log/events/auth）
+	registerConfig(t, d)
+	registerFS(t, d)
+	registerRoute(t, d)
+	registerSchedule(t, d)
+	registerLog(t, d)
+	registerEvents2(t, d)
+	registerAuth(t, d)
+
 	return t
 }
+
+// checkPerm 是所有调用的统一权限闸门（包级，供各注册文件复用）。
+//
+// 不在此处放行的调用一律拒绝；未知调用名直接 unknown_call——
+// 这条规则让"实现了却忘记登记权限"在运行期立即暴露（见 scripts/check-syscall-contract.py）。
+func checkPerm(d Deps, call Call) *CallError {
+	need, ok := CallPermissions[call.Name]
+	if !ok {
+		return &CallError{Code: "unknown_call", Message: call.Name}
+	}
+	if need == "" {
+		return nil
+	}
+	role := d.Policy.RoleOf(call.Caller.Subject)
+	if !d.Policy.Allows(role, string(need)) {
+		return &CallError{Code: "denied", Message: fmt.Sprintf("role %s lacks %s", role, need)}
+	}
+	return nil
+}
+
+// allow 保留为薄封装，让各注册文件读起来一致。
+func allow(d Deps, c Call, args map[string]any) *CallError { return checkPerm(d, c) }
 
 // ---- 参数转换辅助（syscall 参数来自 JSON，类型不确定） ----
 

@@ -65,6 +65,8 @@ var CallPermissions = map[string]Permission{
 	"fs.write":        "fs.write",
 	"fs.list":         "fs.read",
 	"config.get":      "config.read",
+	"config.set":      "config.write",
+	"config.list":     "config.read",
 	"config.watch":    "config.read",
 	"auth.public":     "", // 取当前主体的公开信息
 	"auth.check":      "", // 自查能力点
@@ -80,6 +82,7 @@ var CallPermissions = map[string]Permission{
 	"task.once":       "task.submit",
 	"task.cron":       "task.submit",
 	"route.mount":     "route.mount",
+	"route.unmount":   "route.mount",
 	"ws.mount":        "route.mount",
 	"ui.declare":      "", // 只声明 UI，不改内核状态
 	"ui.withdraw":     "", // 撤销声明（服务停止时）

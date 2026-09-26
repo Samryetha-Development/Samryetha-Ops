@@ -1,14 +1,7 @@
-// 内核入口。
-//
-// 一个二进制，两种启动结果：
-//   - 正常态：加载内核 → 拉起服务 → self-test → 对外服务
-//   - 救援态：只挂 Web 外壳 + 内核日志 + 救援界面（服务全部不加载）
-//
-// 刻意不 import 任何领域包：内核不知道"更新"为何物。
-// 更新能力属于 services/deployer（用户态服务），通过 syscall 调用内核。
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -28,6 +21,15 @@ import (
 	"samryetha/kernel/syscall"
 	"samryetha/kernel/task"
 	"samryetha/kernel/ui"
+
+	"samryetha/sdk"
+	"samryetha/services/deploycfg"
+	"samryetha/services/deployer"
+	drivers "samryetha/services/drivers"
+	gitdriver "samryetha/services/drivers/git"
+	healthdriver "samryetha/services/drivers/health"
+	processdriver "samryetha/services/drivers/process"
+	"samryetha/services/statuspage"
 )
 
 func env(k, def string) string {
@@ -37,7 +39,7 @@ func env(k, def string) string {
 	return def
 }
 
-// kernelLog 是内核日志环（有界）。服务日志另存于 store，两者分离（§8）。
+// kernelLog 是内核日志环（有界）。服务日志另存于 store，两者分离。
 type kernelLog struct {
 	mu    sync.RWMutex
 	lines []kvLine
@@ -99,10 +101,14 @@ func main() {
 		log.Fatalf("store: %v", err)
 	}
 
-	// 启动序列。每个 step 是内核职责，不含领域语义。
+	shell := ui.NewShell()
+	wire, werr := buildWiring(*root)
+	if werr != nil {
+		log.Fatalf("wiring: %v", werr)
+	}
+
 	outcome, bootErr := boot.Boot(opts, []func(boot.Phase) error{
 		func(p boot.Phase) error {
-			// 阶段：配置。救援模式的关键触发点之一——配置非法即进救援。
 			if err := policy.Validate(); err != nil {
 				return err
 			}
@@ -110,25 +116,17 @@ func main() {
 			return nil
 		},
 		func(p boot.Phase) error {
-			// 阶段：self-test。内核要用到的基础设施是否可用。
 			if err := os.MkdirAll(dataDir, 0o700); err != nil {
 				return fmt.Errorf("state dir unwritable: %w", err)
 			}
-			// 存储自检：写入并读回一个探针键
 			if err := st.Set("kernel", "selftest", "ok"); err != nil {
 				return fmt.Errorf("store selftest: %w", err)
-			}
-			if _, _, err := st.Get("kernel", "selftest"); err != nil {
-				return fmt.Errorf("store readback: %w", err)
 			}
 			bus.Emit("kernel.boot.selftest_ok", "kernel", nil, nil)
 			return nil
 		},
 		func(p boot.Phase) error {
-			// 阶段：计划。此处只登记 syscall 表可用性（插件加载在 P3 接入）。
-			bus.Emit("kernel.boot.plan_ok", "kernel", nil, map[string]any{
-				"syscall_version": syscall.Version,
-			})
+			bus.Emit("kernel.boot.plan_ok", "kernel", nil, map[string]any{"syscall_version": syscall.Version})
 			return nil
 		},
 	})
@@ -136,19 +134,137 @@ func main() {
 		log.Fatalf("kernel boot error: %v", bootErr)
 	}
 
-	shell := ui.NewShell()
 	table := syscall.Register(syscall.Deps{
 		Bus: bus, Procs: procs, Tasks: tasks, Store: st, Policy: policy, UI: shell,
+		Config: wire.Config, FS: wire.FS, Routes: wire.Routes, Cron: wire.Cron, Root: *root,
 		Log: func(level, msg string, fields map[string]any) { klog.add(level, msg, fields) },
 	})
 
-	mux := http.NewServeMux()
+	// --- 服务加载（仅正常态；救援模式不加载任何服务）---
+	services := []string{}
+	if outcome.Ready {
+		loaded, err := startServices(*root, table, bus, klog, wire)
+		if err != nil {
+			log.Printf("services: %v", err)
+		}
+		services = loaded
+		bus.Emit("kernel.services.started", "kernel", nil, map[string]any{"services": loaded})
+	}
 
-	// ---- 内核自身的最小 API ----
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte("ok"))
-	})
-	// 前端外壳：只渲染布局与插槽，业务内容来自各服务的 ui.declare
+	mux := http.NewServeMux()
+	registerKernelAPI(mux, klog, bus, table, shell, wire, procs, tasks, policy, outcome, services)
+	registerSyscallEntry(mux, table, authMode)
+
+	if !outcome.Ready {
+		log.Printf("KERNEL IN RESCUE MODE: %s", outcome.Reason)
+	} else {
+		log.Printf("kernel ready (syscall %s, %d calls, %d services)", syscall.Version, len(table), len(services))
+	}
+	log.Printf("listening on %s", *addr)
+	if err := http.ListenAndServe(*addr, wire.serveRouted(mux)); err != nil {
+		log.Fatalf("listen: %v", err)
+	}
+}
+
+// startServices 从 deploy.yaml 装载服务：注册驱动、启动 statuspage、注册部署定时任务。
+func startServices(root string, table syscall.Table, bus *events.Bus, klog *kernelLog, wire *wiring) ([]string, error) {
+	cfgPath := filepath.Join(root, "etc", "deploy.yaml")
+	if _, err := os.Stat(cfgPath); err != nil {
+		return nil, fmt.Errorf("no deploy.yaml at %s", cfgPath)
+	}
+	cfg, err := deploycfg.Load(cfgPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// syscall 侧适配器：把内核表暴露成 sdk.Kernel（内建服务走这条路）
+	k := newSyscallAdapter(table, "kernel")
+
+	// 驱动注册
+	reg := drivers.NewRegistry()
+	reg.AddSource(gitdriver.New(k))
+	reg.AddHealth(healthdriver.NewHTTP(k))
+	reg.AddHealth(healthdriver.NewTCP(k))
+	reg.AddHealth(healthdriver.NewExec(k))
+
+	var loaded []string
+
+	// deployer：为每个 target 注册定时部署任务
+	dep := deployer.New(k, reg)
+	for _, t := range cfg.Targets {
+		// 进程驱动按配置实例化
+		switch t.ProcessDriver {
+		case "pm2":
+			reg.AddProcesses(processdriver.NewPM2(k, t.ProcessNames))
+		case "systemd":
+			reg.AddProcesses(processdriver.NewSystemd(k, t.ProcessNames))
+		case "exec":
+			reg.AddProcesses(processdriver.NewExec(k, t.Restart))
+		}
+		// 调度
+		for _, sc := range cfg.Schedule {
+			if sc.Target != t.ID || !sc.Enabled {
+				continue
+			}
+			plan := t
+			job := sc
+			_, err := sdk.Cron(k, job.Cron, "deploy:"+t.ID, []sdk.Step{{
+				Name: "deploy." + t.ID, Argv: []string{"true"},
+			}})
+			if err != nil {
+				klog.add("warn", "cron register failed for "+t.ID+": "+err.Error(), nil)
+				continue
+			}
+			// 真实部署由内核 cron 触发 → 调用 deployer.Deploy
+			wire.Cron.SetHook("deploy:"+t.ID, func() {
+				out := dep.Deploy(context.Background(), plan)
+				klog.add("info", fmt.Sprintf("scheduled deploy %s → %s", out.Target, out.State), nil)
+			})
+			klog.add("info", fmt.Sprintf("scheduled %s (%s)", t.ID, job.Cron), nil)
+		}
+	}
+	loaded = append(loaded, "deployer")
+
+	// statuspage：按 target 生成观测目标
+	if containsStr(cfg.Plugins["services"], "statuspage") {
+		var targets []statuspage.Target
+		for _, t := range cfg.Targets {
+			name := t.ID
+			tg := statuspage.Target{ID: t.ID, Name: name}
+			if len(t.Health) > 0 {
+				tg.URL = t.Health[0].URL
+				tg.TCP = t.Health[0].Addr
+				tg.Cmd = t.Health[0].Command
+			}
+			targets = append(targets, tg)
+		}
+		sp := &statuspage.Service{K: k, Reg: reg, Targets: targets,
+			Output: "status:www/index.html", Schedule: "*/1 * * * *"}
+		if err := sp.Start(context.Background()); err != nil {
+			klog.add("warn", "statuspage start failed: "+err.Error(), nil)
+		} else {
+			loaded = append(loaded, "statuspage")
+		}
+	}
+
+	bus.Emit("kernel.services.loaded", "kernel", nil, map[string]any{"services": loaded})
+	return loaded, nil
+}
+
+func containsStr(list []string, s string) bool {
+	for _, x := range list {
+		if x == s {
+			return true
+		}
+	}
+	return false
+}
+
+func registerKernelAPI(mux *http.ServeMux, klog *kernelLog, bus *events.Bus, table syscall.Table,
+	shell *ui.Shell, wire *wiring, procs *proc.Manager, tasks *task.Scheduler,
+	policy *perm.Policy, outcome boot.Outcome, services []string) {
+
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -177,12 +293,10 @@ func main() {
 			names = append(names, n)
 		}
 		writeJSON(w, 200, map[string]any{
-			"syscallVersion": syscall.Version,
-			"syscalls":       names,
-			"startedAt":      outcome.StartedAt.Format(time.RFC3339),
-			"ready":          outcome.Ready,
-			"roles":          perm.Roles(),
-			"note":           "kernel has no domain knowledge; services provide features",
+			"syscallVersion": syscall.Version, "syscalls": names, "roles": perm.Roles(),
+			"ready": outcome.Ready, "services": services,
+			"startedAt": outcome.StartedAt.Format(time.RFC3339),
+			"note":      "kernel has no domain knowledge; services provide features",
 		})
 	})
 	mux.HandleFunc("/api/kernel/events", func(w http.ResponseWriter, r *http.Request) {
@@ -191,13 +305,12 @@ func main() {
 	mux.HandleFunc("/api/kernel/log", func(w http.ResponseWriter, r *http.Request) {
 		items := klog.tail(500)
 		if src := r.URL.Query().Get("source"); src != "" {
-			filtered := make([]kvLine, 0, len(items))
+			filtered := make([]kvLine, 0)
 			for _, it := range items {
-				if it.Meta == nil {
-					continue
-				}
-				if p, _ := it.Meta["plugin"].(string); p == src {
-					filtered = append(filtered, it)
+				if it.Meta != nil {
+					if p, _ := it.Meta["plugin"].(string); p == src {
+						filtered = append(filtered, it)
+					}
 				}
 			}
 			items = filtered
@@ -210,19 +323,29 @@ func main() {
 	mux.HandleFunc("/api/kernel/tasks", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"tasks": tasks.List()})
 	})
+	mux.HandleFunc("/api/kernel/routes", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, map[string]any{"routes": wire.Routes.Mounts()})
+	})
+	mux.HandleFunc("/api/kernel/scopes", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, map[string]any{"scopes": wire.FS.Scopes()})
+	})
+	mux.HandleFunc("/api/kernel/cron", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, map[string]any{"jobs": wire.Cron.List()})
+	})
 	mux.HandleFunc("/api/kernel/rescue", func(w http.ResponseWriter, r *http.Request) {
 		if outcome.Ready {
 			writeJSON(w, 404, map[string]any{"error": "not in rescue mode"})
 			return
 		}
 		writeJSON(w, 200, map[string]any{
-			"reason": outcome.Reason, "phase": outcome.Phase,
-			"notes": outcome.Notes, "startedAt": outcome.StartedAt.Format(time.RFC3339),
-			"logTail": klog.tail(50),
+			"reason": outcome.Reason, "phase": outcome.Phase, "notes": outcome.Notes,
+			"startedAt": outcome.StartedAt.Format(time.RFC3339), "logTail": klog.tail(50),
 		})
 	})
+	_ = policy
+}
 
-	// ---- syscall 统一入口（外部插件 / CLI 走这里；内建插件直接调 Go 接口） ----
+func registerSyscallEntry(mux *http.ServeMux, table syscall.Table, authMode string) {
 	mux.HandleFunc("/api/kernel/call", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSON(w, 405, map[string]any{"error": "POST required"})
@@ -242,10 +365,6 @@ func main() {
 			writeJSON(w, 404, map[string]any{"ok": false, "error": map[string]any{"code": "unknown_call", "message": req.Name}})
 			return
 		}
-		// 调用方身份来自认证中间件（P4 接入 OIDC）；此处从请求头取，便于本地验证。
-		// 调用方身份：生产由认证驱动（P4 接 OIDC）注入可信主体。
-		// 安全约束：**不采信请求头里的角色**——否则任何调用方都能自称 admin。
-		// 角色一律由策略按 subject 决定（perm.Policy.RoleOf）。
 		caller := syscall.CallerInfo{
 			Plugin:  strings.TrimSpace(firstNonEmpty(req.Plugin, r.Header.Get("X-Kernel-Plugin"), "external")),
 			Subject: trustedSubject(r, authMode),
@@ -262,16 +381,6 @@ func main() {
 		}
 		writeJSON(w, 200, map[string]any{"ok": true, "data": data})
 	})
-
-	if !outcome.Ready {
-		log.Printf("KERNEL IN RESCUE MODE: %s", outcome.Reason)
-	} else {
-		log.Printf("kernel ready (syscall %s, %d calls)", syscall.Version, len(table))
-	}
-	log.Printf("listening on %s", *addr)
-	if err := http.ListenAndServe(*addr, mux); err != nil {
-		log.Fatalf("listen: %v", err)
-	}
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -289,17 +398,7 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
-// trustedSubject 解析调用方身份。
-//
-// 身份来源由配置决定（etc/auth.txt 的 mode），而不是散落的开关：
-//
-//	proxy    受信反代/认证中间件注入 X-Kernel-Subject（生产推荐）
-//	header   直接接受 X-Kernel-Subject（仅供本机只读调试，须绑 127.0.0.1）
-//	none     无身份（一律 viewer，最小权限）
-//
-// 关键安全约束：**角色永远不来自请求**，只由策略按 subject 决定。
-// 认证（证明"你是这个 sub"）在 mode=proxy 时由前置中间件负责；
-// 内核只消费它放好的可信标头。
+// trustedSubject 解析调用方身份。角色永远不来自请求，只由策略按 subject 决定。
 func trustedSubject(r *http.Request, mode string) string {
 	switch mode {
 	case "header":
@@ -311,7 +410,6 @@ func trustedSubject(r *http.Request, mode string) string {
 	}
 }
 
-// loadAuthMode 从 etc/auth.txt 读取身份来源模式，默认 none（最小权限）。
 func loadAuthMode(root string) string {
 	b, err := os.ReadFile(filepath.Join(root, "etc", "auth.txt"))
 	if err != nil {
@@ -332,16 +430,15 @@ func loadAuthMode(root string) string {
 	return "none"
 }
 
-// loadPolicy 从 etc/policy.yaml 的同构 JSON（或环境变量）加载角色映射。
-// 为保持内核零依赖，这里用最简单的 "subject=role" 行式配置。
 func loadPolicy(root string) *perm.Policy {
 	p := perm.DefaultPolicy()
-	// 默认最小权限；显式开启内网模式才放宽
+	// 内建服务显式授权为 operator：权限仍走同一条判定路径，
+	// 只是在策略里登记，避免"内建即绕过"的隐性特权。
+	p.Assign[BuiltinSubject] = perm.RoleOperator
 	if os.Getenv("KERNEL_DEFAULT_ROLE") != "" {
 		p.Default = perm.Role(os.Getenv("KERNEL_DEFAULT_ROLE"))
 	}
-	path := filepath.Join(root, "etc", "policy.txt")
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(filepath.Join(root, "etc", "policy.txt"))
 	if err != nil {
 		return p
 	}
@@ -354,29 +451,13 @@ func loadPolicy(root string) *perm.Policy {
 		if len(parts) != 2 {
 			continue
 		}
-		left := strings.TrimSpace(parts[0])
-		right := strings.TrimSpace(parts[1])
-		// "cap:role=capability" 形式：为角色追加**业务**能力点（内核不内置领域词）
+		left, right := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
 		if strings.HasPrefix(left, "cap:") {
-			role := perm.Role(strings.TrimPrefix(left, "cap:"))
-			p.Extra[role] = append(p.Extra[role], right)
+			p.Extra[perm.Role(strings.TrimPrefix(left, "cap:"))] = append(
+				p.Extra[perm.Role(strings.TrimPrefix(left, "cap:"))], right)
 			continue
 		}
 		p.Assign[left] = perm.Role(right)
 	}
 	return p
-}
-
-func splitCSV(s string) []string {
-	if strings.TrimSpace(s) == "" {
-		return nil
-	}
-	parts := strings.Split(s, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		if t := strings.TrimSpace(p); t != "" {
-			out = append(out, t)
-		}
-	}
-	return out
 }

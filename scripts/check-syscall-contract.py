@@ -15,7 +15,10 @@
 import re
 import sys
 
-REG = "kernel/syscall/register.go"
+import glob
+# 扫描该包内**所有**注册文件，而不是只看 register.go——
+# 早前只扫单文件，导致扩展注册的调用未被纳入校验（自检本身漏检）。
+REG_FILES = sorted(glob.glob("kernel/syscall/register*.go"))
 TYPES = "kernel/syscall/types.go"
 
 # 尚未实现、但已在权限表登记的计划内调用（随实现推进逐步清空）
@@ -27,7 +30,7 @@ PLANNED_NOT_IMPLEMENTED = {
 
 
 def main() -> int:
-    reg = open(REG, encoding="utf-8").read()
+    reg = "".join(open(f, encoding="utf-8").read() for f in REG_FILES)
     types = open(TYPES, encoding="utf-8").read()
 
     implemented = set(re.findall(r't\["([a-z][a-z_]*\.[a-z_]+)"\]', reg))

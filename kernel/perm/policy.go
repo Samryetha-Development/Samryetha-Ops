@@ -30,7 +30,7 @@ var builtinRoles = map[Role][]string{
 	},
 	RoleOperator: {
 		"log.read", "event.read", "proc.read", "task.read", "config.read", "store.own",
-		"event.emit", "proc.manage", "task.submit", "route.mount",
+		"event.emit", "proc.manage", "task.submit", "route.mount", "config.write",
 	},
 	RoleAdmin: {"*"}, // 通配：全部能力
 }
