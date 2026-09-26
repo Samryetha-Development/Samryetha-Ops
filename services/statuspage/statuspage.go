@@ -30,6 +30,10 @@ type Service struct {
 	Targets []Target
 	// Output 静态页输出路径（scope:relpath），空则不写盘
 	Output string
+	// Generator 非空时改用外部命令生成页面（复用既有生成器）。
+	// 这是过渡方案：内核负责调度与探活，渲染仍由既有实现完成；
+	// 待渲染能力完整迁移后置空即可。
+	Generator []string
 	// Interval 自检间隔（cron 表达式）
 	Schedule string
 }
@@ -111,7 +115,12 @@ func (s *Service) RunOnce(ctx context.Context) []Result {
 		s.K.Emit(tone, map[string]any{"target": r.Target, "name": r.Name, "detail": r.Detail, "ms": r.MS})
 	}
 
-	if s.Output != "" {
+	if len(s.Generator) > 0 {
+		// 外部生成器模式：由内核跑命令产出页面（内建 statuspage 的简版渲染跳过）
+		if err := s.runGenerator(ctx); err != nil {
+			s.K.Log("warn", "statuspage generator failed: "+err.Error(), nil)
+		}
+	} else if s.Output != "" {
 		if err := s.writeStatic(results); err != nil {
 			s.K.Log("warn", "statuspage static write failed: "+err.Error(), nil)
 		}
@@ -169,6 +178,30 @@ func (s *Service) writeStatic(results []Result) error {
 	}
 	fmt.Fprintf(&b, "</ul><p>updated %s</p>", time.Now().Format(time.RFC3339))
 	return sdk.FsWrite(s.K, s.Output, b.String())
+}
+
+// runGenerator 跑外部生成器（内核负责超时与输出捕获）。
+func (s *Service) runGenerator(ctx context.Context) error {
+	taskID, err := s.K.Submit("statuspage.generate", []sdk.Step{{
+		Name: "generate", Argv: s.Generator, Timeout: 120000,
+	}}, 180000)
+	if err != nil {
+		return err
+	}
+	for i := 0; i < 600; i++ {
+		st, err := s.K.Status(taskID)
+		if err != nil {
+			return err
+		}
+		switch st.State {
+		case "succeeded":
+			return nil
+		case "failed", "canceled":
+			return fmt.Errorf("%s: %s", st.State, st.Err)
+		}
+		time.Sleep(300 * time.Millisecond)
+	}
+	return fmt.Errorf("generator timeout")
 }
 
 func (s *Service) declareUI() { s.declareUIWith(nil) }

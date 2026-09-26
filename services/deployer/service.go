@@ -55,6 +55,11 @@ type Plan struct {
 	BeforeDeploy []string
 	AfterDeploy  []string
 
+	// Marker 是部署成功后的标记文件（scope:relpath）。
+	// 状态页等消费方读它来判断"已部署版本"——不写它就会显示成"待部署"，
+	// 即使代码其实已经更新（这类不一致会让人误判系统状态）。
+	Marker string
+
 	Keep int
 }
 
@@ -242,7 +247,18 @@ func (s *Service) Deploy(ctx context.Context, p Plan) Outcome {
 		}
 	}
 
-	// 10) 后置钩子（best-effort：失败不回滚，但要记录）
+	// 10) 写部署标记（状态页等靠它判断已部署版本）
+	if p.Marker != "" {
+		marker := p.Marker
+		rev := out.To
+		if !step("mark", func() error { return sdk.FsWrite(s.K, marker, rev) }) {
+			// 标记写失败不回滚：代码已更新且健康，只是外部视图会滞后。
+			// 但要明确记录，否则会出现"实际已部署、页面显示待部署"的困惑。
+			cx.Log("warn", "deployment marker write failed: "+marker, nil)
+		}
+	}
+
+	// 11) 后置钩子（best-effort：失败不回滚，但要记录）
 	for _, h := range p.AfterDeploy {
 		hook := h
 		_ = step("after:"+firstWord(hook), func() error { return s.shell(cx, hook) })

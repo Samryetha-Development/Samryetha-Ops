@@ -68,6 +68,9 @@ targets:
       - "pm2 reload samryetha-backend"
       - "pm2 reload samryetha-frontend"
     keep: 3                          # 保留最近 3 个版本用于回滚
+    # 部署成功后写这个文件，状态页据此显示"已部署版本"。
+    # 不写会导致"代码已更新、页面仍显示待部署"的错觉。
+    marker: "logs:.last-deployed"
     # 迁移钩子：有迁移文件变更时才执行
     migrations:
       driver: command
@@ -101,6 +104,7 @@ targets:
       before_deploy:
         - "test -f /opt/Samryetha/status/generate.sh"
     keep: 2
+    marker: "logs:.last-deployed-dev"
 
   # 更新站自身也是一个目标（自举）。它走普通部署流程，不需要 OTA——
   # 这正是"把更新降级为用户态服务"换来的好处。
@@ -122,6 +126,18 @@ targets:
     restart:
       - "systemctl restart samryetha-status"
     keep: 3
+
+# 状态页服务配置
+statuspage:
+  # 输出目录：必须是 Caddy 实际服务的目录，否则页面会写到没人看的地方
+  # （曾把内核的简版状态页写到 kernel/status/，而站点仍指向 status/）。
+  output: "status:www/index.html"
+  # 生成器：目前复用既有的 Python 生成器（6 语言/90 天可用率/事件记录等），
+  # 由内核 cron 驱动。完整迁移进内核服务是后续工作。
+  generator:
+    command: "python3 /opt/Samryetha/status/generate.py"
+    cwd: /opt/Samryetha
+    timeout_ms: 120000
 
 # 部署参数（内核服务的配置，非硬编码）
 deployer:

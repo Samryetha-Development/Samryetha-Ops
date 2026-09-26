@@ -239,8 +239,28 @@ func startServices(root string, table syscall.Table, bus *events.Bus, klog *kern
 			}
 			targets = append(targets, tg)
 		}
+		// 输出目录与生成方式来自配置（不再硬编码）：
+		// Caddy 指向哪个目录、页面由谁渲染，都是部署决策而非代码常量。
+		out := "status:www/index.html"
+		var generator []string
+		sched := "*/1 * * * *"
+		if v, ok := wire.Config.Get("statuspage.output"); ok {
+			if str, ok := v.(string); ok && str != "" {
+				out = str
+			}
+		}
+		if v, ok := wire.Config.Get("statuspage.generator.command"); ok {
+			if cmd, ok := v.(string); ok && cmd != "" {
+				generator = []string{"sh", "-lc", cmd}
+			}
+		}
+		if v, ok := wire.Config.Get("statuspage.schedule"); ok {
+			if str, ok := v.(string); ok && str != "" {
+				sched = str
+			}
+		}
 		sp := &statuspage.Service{K: k, Reg: reg, Targets: targets,
-			Output: "status:www/index.html", Schedule: "*/1 * * * *"}
+			Output: out, Generator: generator, Schedule: sched}
 		if err := sp.Start(context.Background()); err != nil {
 			klog.add("warn", "statuspage start failed: "+err.Error(), nil)
 		} else {

@@ -46,6 +46,38 @@ func Open(root string) (*Tree, error) {
 	return t, nil
 }
 
+// MergeDefaults 把来源合并进配置树作为**默认值**：
+// 已存在的键不覆盖（显式配置优先于描述文件里的默认）。
+//
+// 用途：deploy.yaml 里的服务配置段应能被 config.get 读到，
+// 但不应覆盖使用者在 config.json 里的显式设置。
+func (t *Tree) MergeDefaults(extra map[string]any) {
+	if len(extra) == 0 {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.data = mergeDefaults(extra, t.data)
+}
+
+// mergeDefaults 以 base 为默认、over 为覆盖，返回合并结果。
+func mergeDefaults(base, over map[string]any) map[string]any {
+	out := map[string]any{}
+	for k, v := range base {
+		out[k] = v
+	}
+	for k, ov := range over {
+		if bm, ok := out[k].(map[string]any); ok {
+			if om, ok := ov.(map[string]any); ok {
+				out[k] = mergeDefaults(bm, om)
+				continue
+			}
+		}
+		out[k] = ov
+	}
+	return out
+}
+
 // Get 按点号路径取值，支持 map 逐层下钻。找不到返回 (nil,false)。
 func (t *Tree) Get(path string) (any, bool) {
 	t.mu.RLock()

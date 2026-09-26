@@ -42,6 +42,10 @@ type Notify struct {
 	URL    string
 }
 
+// ParseRaw 暴露底层解析器：让其它组件（如内核的配置合并）复用同一套 YAML 子集解析，
+// 避免出现两套解析器各自演化、迟早不一致。
+func ParseRaw(src string) (map[string]any, error) { return parseYAML(src) }
+
 // Load 读取并解析。
 func Load(path string) (*File, error) {
 	b, err := os.ReadFile(path)
@@ -97,6 +101,7 @@ func toPlan(m map[string]any) deployer.Plan {
 		Build:   toStrSlice(m["build"]),
 		Restart: toStrSlice(m["restart"]),
 		Keep:    toInt(m["keep"], 3),
+		Marker:  str(m["marker"]),
 	}
 	// source：字符串或映射（取 driver 字段）
 	switch v := m["source"].(type) {
