@@ -102,11 +102,13 @@ targets:
       names: [samryetha-dev-backend, samryetha-dev-frontend]
     restart:
       - "pm2 restart samryetha-dev-backend samryetha-dev-frontend"
-    # dev 数据同步由旧脚本负责，暂以 hook 表达；文件不存在时会在部署中被明确报错
-    # （曾因引用不存在的脚本导致 before_deploy 失败——这正是"明确失败"的价值）
+    # dev 数据同步：把主站数据库与附件镜像到 dev（dev 是主站的镜像环境）。
+    #
+    # 这是**部署前置**：必须在构建/重启之前完成，否则 dev 会带着旧数据启动。
+    # 脚本会先停 dev 后端（释放数据库文件），因此 dev 的 restart 步骤必须在其后。
     hooks:
       before_deploy:
-        - "test -f /opt/Samryetha/status/generate.sh"
+        - "bash /opt/Samryetha/kernel/scripts/dev-sync-data.sh"
     keep: 2
     marker: "markers:.last-deployed-dev"
 

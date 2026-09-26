@@ -257,7 +257,7 @@ func startServices(root string, table syscall.Table, bus *events.Bus, klog *kern
 		log.Printf("deployer action register failed: %v", err)
 		klog.add("warn", "deployer action register failed: "+err.Error(), nil)
 	}
-	if err := dep.DeclareUI(context.Background(), allPlans, scheduleMap); err != nil {
+	if err := dep.DeclareFullUI(context.Background(), allPlans, scheduleMap); err != nil {
 		log.Printf("deployer ui declare failed: %v", err)
 		klog.add("warn", "deployer ui declare failed: "+err.Error(), nil)
 	}

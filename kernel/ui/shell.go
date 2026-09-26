@@ -76,13 +76,16 @@ type Component struct {
 }
 
 // Item 是列表/键值/时间线的一项。
+// 带 Action 时该项可点击（用于"每个版本一个回滚按钮"这类场景）。
 type Item struct {
-	Key   string `json:"key,omitempty"`
-	Label string `json:"label,omitempty"`
-	Value string `json:"value,omitempty"`
-	Text  string `json:"text,omitempty"`
-	At    int64  `json:"at,omitempty"`
-	Tone  string `json:"tone,omitempty"`
+	Key     string  `json:"key,omitempty"`
+	Label   string  `json:"label,omitempty"`
+	Value   string  `json:"value,omitempty"`
+	Text    string  `json:"text,omitempty"`
+	At      int64   `json:"at,omitempty"`
+	Tone    string  `json:"tone,omitempty"`
+	Action  *Action `json:"action,omitempty"`
+	Confirm string  `json:"confirm,omitempty"`
 }
 
 // Action 描述一个可点击动作。

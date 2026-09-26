@@ -51,10 +51,39 @@ func (s *Service) RegisterActions(plans []Plan) error {
 // 外壳负责渲染与交互。服务不产出 HTML——因此设计风格由外壳统一保证，
 // 换一个项目无需改写界面代码。
 func (s *Service) DeclareUI(ctx context.Context, plans []Plan, schedule map[string]string) error {
+	cards, actions, sections := s.buildTopLevel(ctx, plans, schedule)
+	slots := map[string][]map[string]any{
+		"overview.cards":    cards,
+		"actions":           actions,
+		"settings.sections": sections,
+		"logs.sources": {
+			{"kind": "text", "id": "deployment", "label": "deployment"},
+			{"kind": "text", "id": "kernel", "label": "kernel"},
+			{"kind": "text", "id": "statuspage", "label": "statuspage"},
+		},
+	}
+	nav := []map[string]any{
+		{"id": "deploy", "label": "部署", "order": 10},
+		{"id": "logs", "label": "日志", "order": 20},
+	}
+	// 诊断：声明失败必须可见（此前失败被上层 warn 吞掉，表现为"页面什么都没有"）
+	if err := sdk.DeclareUI(s.K, slots, nav); err != nil {
+		_ = s.K.Log("warn", "deployer ui.declare failed: "+err.Error(), nil)
+		return err
+	}
+	_ = s.K.Log("info", fmt.Sprintf("deployer ui declared: %d cards, %d actions, %d sections",
+		len(cards), len(actions), len(sections)), nil)
+	return nil
+}
+
+// targetState 读取某目标最近一次部署的结果（来自内核事件流）。
+
+// buildTopLevel 构造概览卡片、操作按钮与设置区。
+// 抽出来让完整面板与精简面板共用同一份构造逻辑，避免两处各写一遍、慢慢长歪。
+func (s *Service) buildTopLevel(ctx context.Context, plans []Plan, schedule map[string]string) ([]map[string]any, []map[string]any, []map[string]any) {
 	cards := make([]map[string]any, 0, len(plans))
 	actions := make([]map[string]any, 0)
 	sections := make([]map[string]any, 0)
-
 	for i, p := range plans {
 		// 读取该目标的已部署标记与实际 HEAD，呈现"是否落后"
 		deployed := ""
@@ -118,30 +147,9 @@ func (s *Service) DeclareUI(ctx context.Context, plans []Plan, schedule map[stri
 		}
 	}
 
-	slots := map[string][]map[string]any{
-		"overview.cards":    cards,
-		"actions":           actions,
-		"settings.sections": sections,
-		"logs.sources": {
-			{"kind": "text", "id": "deployment", "label": "deployment"},
-			{"kind": "text", "id": "kernel", "label": "kernel"},
-		},
-	}
-	nav := []map[string]any{
-		{"id": "deploy", "label": "部署", "order": 10},
-		{"id": "logs", "label": "日志", "order": 20},
-	}
-	// 诊断：声明失败必须可见（此前失败被上层 warn 吞掉，表现为"页面什么都没有"）
-	if err := sdk.DeclareUI(s.K, slots, nav); err != nil {
-		_ = s.K.Log("warn", "deployer ui.declare failed: "+err.Error(), nil)
-		return err
-	}
-	_ = s.K.Log("info", fmt.Sprintf("deployer ui declared: %d cards, %d actions, %d sections",
-		len(cards), len(actions), len(sections)), nil)
-	return nil
+	return cards, actions, sections
 }
 
-// targetState 读取某目标最近一次部署的结果（来自内核事件流）。
 func (s *Service) targetState(ctx context.Context, p Plan) struct{ state string } {
 	var out struct{ state string }
 	// 通过内核事件历史查询最近一条 deployment.* 且 target 匹配的事件

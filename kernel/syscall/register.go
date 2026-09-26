@@ -56,11 +56,21 @@ func buildComponent(m map[string]any) ui.Component {
 	if arr, ok := m["items"].([]any); ok {
 		for _, x := range arr {
 			if im, ok := x.(map[string]any); ok {
-				c.Items = append(c.Items, ui.Item{
+				it := ui.Item{
 					Key: str(im["key"], ""), Label: str(im["label"], ""),
 					Value: str(im["value"], ""), Text: str(im["text"], ""),
 					At: i64(im["at"], 0), Tone: str(im["tone"], ""),
-				})
+					Confirm: str(im["confirm"], ""),
+				}
+				if am := toAnyMap(im["action"]); am != nil {
+					it.Action = &ui.Action{Kind: str(am["kind"], ""), Target: str(am["target"], ""),
+						Method: str(am["method"], ""), Confirm: str(am["confirm"], ""),
+						Body: str(am["body"], "")}
+					if it.Confirm == "" {
+						it.Confirm = it.Action.Confirm
+					}
+				}
+				c.Items = append(c.Items, it)
 			}
 		}
 	}
@@ -81,6 +91,20 @@ func buildComponent(m map[string]any) ui.Component {
 		}
 	}
 	c.Confirm = str(m["confirm"], "")
+	if arr := toAnyList(m["columns"]); arr != nil {
+		for _, x := range arr {
+			c.Columns = append(c.Columns, fmt.Sprint(x))
+		}
+	}
+	if rows := toAnyList(m["rows"]); rows != nil {
+		for _, r := range rows {
+			var row []string
+			for _, cell := range toAnyList(r) {
+				row = append(row, fmt.Sprint(cell))
+			}
+			c.Rows = append(c.Rows, row)
+		}
+	}
 	if am, ok := m["action"].(map[string]any); ok {
 		c.Action = &ui.Action{Kind: str(am["kind"], ""), Target: str(am["target"], ""),
 			Method: str(am["method"], ""), Confirm: str(am["confirm"], ""), Body: str(am["body"], "")}

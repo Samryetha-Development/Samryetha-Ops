@@ -147,6 +147,44 @@ textarea,input[type=text],input[type=password],input[type=number],select{
   </section>
   {{end}}{{end}}
 
+  {{/* 通用区块：插件声明组件类型，外壳负责渲染。
+       设计约束：插件不能注入任意 HTML，只能选类型——这样风格永远统一。
+       新增类型只改这里，插件侧无需任何代码变动。 */}}
+  {{with index .Slots "panels"}}{{if nonempty .}}
+  {{range .}}
+  <section class="card">
+    <div class="card-h"><h2>{{.Title}}</h2>{{if .Source}}<span class="badge">{{.Source}}</span>{{end}}</div>
+    {{if eq .Kind "table"}}
+      <table><thead><tr>{{range .Columns}}<th>{{.}}</th>{{end}}</tr></thead>
+      <tbody>{{range .Rows}}<tr>{{range .}}<td>{{.}}</td>{{end}}</tr>{{end}}</tbody></table>
+    {{else if eq .Kind "list"}}
+      <div class="list">{{range .Items}}
+        <div class="li">
+          <span>{{.Label}}{{if .Text}} <span class="muted">{{.Text}}</span>{{end}}</span>
+          <span class="{{toneClass .Tone}}">{{.Value}}</span>
+        </div>{{end}}</div>
+    {{else if eq .Kind "keyvalue"}}
+      <div>{{range .Items}}
+        <div class="kv"><span class="k">{{.Label}}</span><span class="v {{toneClass .Tone}}">{{.Value}}</span></div>
+      {{end}}</div>
+    {{else if eq .Kind "timeline"}}
+      <div class="timeline">{{range .Items}}
+        <div class="tl"><span class="dot"></span><div class="body">
+          <div>{{.Text}}</div><div class="when">{{.Label}}</div>
+        </div></div>{{end}}</div>
+    {{else if eq .Kind "log"}}
+      <pre class="log">{{.Text}}</pre>
+    {{else if eq .Kind "text"}}
+      <p class="muted" style="margin:0">{{.Text}}</p>
+    {{else if eq .Kind "buttons"}}
+      <div style="display:flex;gap:10px;flex-wrap:wrap">{{range .Items}}
+        <button class="btn" data-action="{{json .Action}}" data-confirm="{{.Label}}">{{.Label}}</button>
+      {{end}}</div>
+    {{end}}
+  </section>
+  {{end}}
+  {{end}}{{end}}
+
   {{with index .Slots "settings.sections"}}{{if nonempty .}}
   <section class="card">
     <div class="card-h"><h2>设置</h2></div>
