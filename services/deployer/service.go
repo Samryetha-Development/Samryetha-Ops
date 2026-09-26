@@ -400,3 +400,83 @@ func short(rev string) string {
 	}
 	return rev
 }
+
+// RollbackToPrevious 把目标回滚到上一版（界面上"回滚"按钮的实现）。
+//
+// 与失败自动回滚的区别：这是**人工主动回滚**，因此：
+//   - 从内核事件历史里找该目标上一次成功的版本作为目标
+//   - 回滚后同样要重启并探活（否则运行的还是坏版本）
+//   - 成功后**写标记**，否则状态页会继续显示错误的版本
+func (s *Service) RollbackToPrevious(ctx context.Context, p Plan) (map[string]any, error) {
+	cx := &drivers.Context{
+		Ctx: ctx, K: s.K,
+		Target: drivers.TargetRef{ID: p.ID, WorkDir: p.WorkDir, Branch: p.Branch},
+		Log:    func(level, msg string, f map[string]any) { _ = s.K.Log(level, "[rollback] "+msg, f) },
+		Emit:   func(topic string, payload map[string]any) { _, _ = s.K.Emit(topic, payload) },
+	}
+
+	// 找上一次成功部署的版本
+	prev, err := s.lastSuccessfulRev(p.ID)
+	if err != nil {
+		return nil, err
+	}
+	if prev == "" {
+		return nil, fmt.Errorf("no previous successful revision recorded for %s", p.ID)
+	}
+
+	src, ok := s.Reg.Source(p.Source)
+	if !ok {
+		return nil, fmt.Errorf("source driver %q not registered", p.Source)
+	}
+
+	if err := src.Reset(cx, prev); err != nil {
+		return nil, fmt.Errorf("reset to %s: %w", short(prev), err)
+	}
+	if p.ProcessDriver != "" {
+		if proc, ok := s.Reg.Processes(p.ProcessDriver); ok {
+			if err := proc.Reload(cx); err != nil {
+				return nil, fmt.Errorf("restart after rollback: %w", err)
+			}
+		}
+	}
+	for _, h := range p.Health {
+		if err := s.checkHealth(cx, h); err != nil {
+			return nil, fmt.Errorf("health after rollback: %w", err)
+		}
+	}
+	if p.Marker != "" {
+		if err := sdk.FsWrite(s.K, p.Marker, prev); err != nil {
+			cx.Log("warn", "marker write after rollback failed: "+err.Error(), nil)
+		}
+	}
+	_, _ = s.K.Emit("deployment.rolled_back", map[string]any{
+		"target": p.ID, "to": prev, "reason": "manual rollback",
+	})
+	return map[string]any{"target": p.ID, "to": prev, "state": "rolled_back"}, nil
+}
+
+// lastSuccessfulRev 从事件历史里找该目标上一次**成功**部署的版本。
+//
+// 为什么用事件而不是本地文件：事件流是内核维护的、跨重启保留的真相来源；
+// 另外存一份"上一版"文件会引入第二个真相来源，迟早不一致。
+func (s *Service) lastSuccessfulRev(target string) (string, error) {
+	ev, err := sdk.CallGeneric(s.K, "event.history", map[string]any{"topic": "deployment", "limit": 200})
+	if err != nil {
+		return "", err
+	}
+	items, _ := ev["items"].([]any)
+	// 从后往前找最近一次 succeeded 的 to
+	for i := len(items) - 1; i >= 0; i-- {
+		m, _ := items[i].(map[string]any)
+		pl, _ := m["payload"].(map[string]any)
+		if pl == nil || pl["target"] != target {
+			continue
+		}
+		if pl["state"] == "succeeded" {
+			if to, _ := pl["to"].(string); to != "" {
+				return to, nil
+			}
+		}
+	}
+	return "", nil
+}

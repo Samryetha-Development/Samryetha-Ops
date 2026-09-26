@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"samryetha/kernel/actions"
 	"samryetha/kernel/cron"
 	"samryetha/kernel/syscall"
 	"samryetha/kernel/task"
@@ -41,6 +42,15 @@ type syscallAdapter struct {
 	// cron 让内建服务把函数绑定到定时任务（见 sdk.BindCron）。
 	// 只注册不绑定会造成"到点触发却什么都不做"的静默空转。
 	cron cronScheduler
+	// actions 让内建服务注册可由 UI 触发的动作
+	actions actionRegistry
+}
+
+// actionRegistry 是内核动作注册表的最小接口。
+// 用 actions.Handler 而非函数字面量：Go 的命名函数类型与等价字面量不互相赋值，
+// 混用会让"实现同一个接口"变成编译错误。
+type actionRegistry interface {
+	RegisterHandler(name, owner string, h actions.Handler)
 }
 
 func newSyscallAdapter(table syscall.Table, plugin string) *syscallAdapter {
@@ -260,4 +270,17 @@ func (a *syscallAdapter) SetCronHook(name string, fn func()) {
 	if a.cron != nil {
 		a.cron.SetHook(name, fn)
 	}
+}
+
+// RegisterAction 实现 sdk.RegisterAction：把内建服务的动作注册到内核。
+//
+// 内核据此把"按钮点击"派发回服务——全程不知道动作的业务含义。
+func (a *syscallAdapter) RegisterAction(name string, h func(context.Context, map[string]any) (map[string]any, error)) error {
+	if a.actions == nil {
+		return fmt.Errorf("action registry not wired")
+	}
+	// 显式转换成 actions.Handler：Go 的命名函数类型与等价字面量不能互相赋值，
+	// 而 sdk 侧只依赖字面量签名（避免把内核的命名类型泄漏进插件 API）。
+	a.actions.RegisterHandler(name, a.plugin, actions.Handler(h))
+	return nil
 }

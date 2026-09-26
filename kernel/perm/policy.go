@@ -34,7 +34,7 @@ var builtinRoles = map[Role][]string{
 		"event.emit", "proc.manage", "task.submit", "route.mount", "config.write",
 		// 文件写仍受 scope 白名单约束（见 kernel/fsops）——
 		// 能力点决定"能不能写"，scope 决定"能写哪里"，两者缺一不可。
-		"fs.read", "fs.write", "fs.list",
+		"fs.read", "fs.write", "fs.list", "action.own",
 	},
 	RoleAdmin: {"*"}, // 通配：全部能力
 }

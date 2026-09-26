@@ -75,6 +75,13 @@ func (k *kernelLog) tail(n int) []kvLine {
 	return out
 }
 
+// 包级引用：renderShell 需要 shell/outcome，但它们是 main 的局部变量。
+// 显式提升为包级，避免给每个 handler 都传一遍。
+var (
+	shellRef   *ui.Shell
+	outcomeRef boot.Outcome
+)
+
 func main() {
 	var (
 		root   = flag.String("root", env("KERNEL_ROOT", "/opt/samryetha"), "配置与状态根目录")
@@ -102,6 +109,7 @@ func main() {
 	}
 
 	shell := ui.NewShell()
+	shellRef = shell
 	wire, werr := buildWiring(*root)
 	if werr != nil {
 		log.Fatalf("wiring: %v", werr)
@@ -133,10 +141,12 @@ func main() {
 	if bootErr != nil {
 		log.Fatalf("kernel boot error: %v", bootErr)
 	}
+	outcomeRef = outcome
 
 	table := syscall.Register(syscall.Deps{
 		Bus: bus, Procs: procs, Tasks: tasks, Store: st, Policy: policy, UI: shell,
-		Config: wire.Config, FS: wire.FS, Routes: wire.Routes, Cron: wire.Cron, Root: *root,
+		Config: wire.Config, FS: wire.FS, Routes: wire.Routes, Cron: wire.Cron,
+		Actions: wire.Actions, Root: *root,
 		Log: func(level, msg string, fields map[string]any) { klog.add(level, msg, fields) },
 	})
 
@@ -177,9 +187,19 @@ func startServices(root string, table syscall.Table, bus *events.Bus, klog *kern
 		return nil, err
 	}
 
-	// syscall 侧适配器：把内核表暴露成 sdk.Kernel（内建服务走这条路）
-	k := newSyscallAdapter(table, "kernel")
-	k.cron = wire.Cron // 让内建服务能把动作绑定到定时任务
+	// syscall 侧适配器：把内核表暴露成 sdk.Kernel（内建服务走这条路）。
+	//
+	// 每个内建服务必须有自己的适配器（独立的 plugin 名）：
+	// 共用同一个会让两个服务的 UI 声明互相覆盖（都叫 "kernel"），
+	// 表现为"只看到最后一个服务的面板"——排查时极难定位。
+	mkAdapter := func(name string) *syscallAdapter {
+		a := newSyscallAdapter(table, name)
+		a.cron = wire.Cron
+		a.actions = wire.Actions
+		return a
+	}
+	k := mkAdapter("kernel")
+	_ = k
 
 	// 驱动注册
 	reg := drivers.NewRegistry()
@@ -191,7 +211,7 @@ func startServices(root string, table syscall.Table, bus *events.Bus, klog *kern
 	var loaded []string
 
 	// deployer：为每个 target 注册定时部署任务
-	dep := deployer.New(k, reg)
+	dep := deployer.New(mkAdapter("deployer"), reg)
 	for _, t := range cfg.Targets {
 		// 进程驱动按配置实例化
 		switch t.ProcessDriver {
@@ -223,6 +243,23 @@ func startServices(root string, table syscall.Table, bus *events.Bus, klog *kern
 			})
 			klog.add("info", fmt.Sprintf("scheduled %s (%s)", t.ID, job.Cron), nil)
 		}
+	}
+	// 收集全部计划，供动作注册与 UI 声明使用
+	var allPlans []deployer.Plan
+	for _, t := range cfg.Targets {
+		allPlans = append(allPlans, t)
+	}
+	scheduleMap := map[string]string{}
+	for _, sc := range cfg.Schedule {
+		scheduleMap[sc.Target] = sc.Cron
+	}
+	if err := dep.RegisterActions(allPlans); err != nil {
+		log.Printf("deployer action register failed: %v", err)
+		klog.add("warn", "deployer action register failed: "+err.Error(), nil)
+	}
+	if err := dep.DeclareUI(context.Background(), allPlans, scheduleMap); err != nil {
+		log.Printf("deployer ui declare failed: %v", err)
+		klog.add("warn", "deployer ui declare failed: "+err.Error(), nil)
 	}
 	loaded = append(loaded, "deployer")
 
@@ -259,7 +296,7 @@ func startServices(root string, table syscall.Table, bus *events.Bus, klog *kern
 				sched = str
 			}
 		}
-		sp := &statuspage.Service{K: k, Reg: reg, Targets: targets,
+		sp := &statuspage.Service{K: mkAdapter("statuspage"), Reg: reg, Targets: targets,
 			Output: out, Generator: generator, Schedule: sched}
 		if err := sp.Start(context.Background()); err != nil {
 			klog.add("warn", "statuspage start failed: "+err.Error(), nil)
@@ -286,27 +323,15 @@ func registerKernelAPI(mux *http.ServeMux, klog *kernelLog, bus *events.Bus, tab
 	policy *perm.Policy, outcome boot.Outcome, services []string) {
 
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })
+	// /update：控制台（与 / 同一个外壳，只是路径不同，便于 Caddy 按路径分流）
+	mux.HandleFunc("/update", func(w http.ResponseWriter, r *http.Request) { renderShell(w, r, "/update") })
+	mux.HandleFunc("/update/", func(w http.ResponseWriter, r *http.Request) { renderShell(w, r, "/update") })
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
 			return
 		}
-		meta := map[string]any{"syscallVersion": syscall.Version,
-			"note": "kernel has no domain knowledge; services provide features"}
-		data := ui.RenderData{
-			Title: "Samryetha control", Subtitle: "kernel + services",
-			Nav: shell.Nav(), Sources: shell.Sources(), KernelMeta: meta,
-		}
-		if !outcome.Ready {
-			data.Rescue = &ui.RescueInfo{Reason: outcome.Reason, Phase: string(outcome.Phase), Notes: outcome.Notes}
-		}
-		html, err := shell.Render(data)
-		if err != nil {
-			http.Error(w, err.Error(), 500)
-			return
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(html))
+		renderShell(w, r, "/")
 	})
 	mux.HandleFunc("/api/kernel/meta", func(w http.ResponseWriter, r *http.Request) {
 		names := make([]string, 0, len(table))
@@ -402,6 +427,27 @@ func registerSyscallEntry(mux *http.ServeMux, table syscall.Table, authMode stri
 		}
 		writeJSON(w, 200, map[string]any{"ok": true, "data": data})
 	})
+}
+
+// renderShell 渲染前端外壳（内核只提供布局与插槽，内容来自各服务声明）。
+func renderShell(w http.ResponseWriter, r *http.Request, path string) {
+	_ = path
+	meta := map[string]any{"syscallVersion": syscall.Version,
+		"note": "kernel has no domain knowledge; services provide features"}
+	data := ui.RenderData{
+		Title: "Samryetha control", Subtitle: "kernel + services",
+		Nav: shellRef.Nav(), Sources: shellRef.Sources(), KernelMeta: meta,
+	}
+	if !outcomeRef.Ready {
+		data.Rescue = &ui.RescueInfo{Reason: outcomeRef.Reason, Phase: string(outcomeRef.Phase), Notes: outcomeRef.Notes}
+	}
+	html, err := shellRef.Render(data)
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_, _ = w.Write([]byte(html))
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

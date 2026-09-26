@@ -10,9 +10,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
+	"samryetha/kernel/actions"
 	"samryetha/kernel/config"
 	"samryetha/kernel/cron"
 	"samryetha/kernel/events"
@@ -34,6 +36,7 @@ type Deps struct {
 	Policy *perm.Policy
 	UI     *ui.Shell
 	// 扩展组件（可空；空则对应调用报 unavailable，而不是静默失败）
+	Actions  *actions.Registry
 	Config   *config.Tree
 	FS       *fsops.FS
 	Routes   *route.Table
@@ -271,12 +274,10 @@ func Register(d Deps) Table {
 		if d.UI == nil {
 			return nil, &CallError{Code: "unavailable", Message: "ui registry not wired"}
 		}
-		slotsRaw, _ := c.Args["slots"].(map[string]any)
 		slots := map[string][]ui.Component{}
-		for slot, arr := range slotsRaw {
-			list, _ := arr.([]any)
-			for _, x := range list {
-				if m, ok := x.(map[string]any); ok {
+		for slot, arr := range toAnyMap(c.Args["slots"]) {
+			for _, x := range toAnyList(arr) {
+				if m := toAnyMap(x); m != nil {
 					slots[slot] = append(slots[slot], buildComponent(m))
 				}
 			}
@@ -325,6 +326,7 @@ func Register(d Deps) Table {
 	}
 
 	// 扩展调用（config/fs/route/schedule/log/events/auth）
+	registerActions(t, d)
 	registerConfig(t, d)
 	registerFS(t, d)
 	registerRoute(t, d)
@@ -358,7 +360,53 @@ func checkPerm(d Deps, call Call) *CallError {
 // allow 保留为薄封装，让各注册文件读起来一致。
 func allow(d Deps, c Call, args map[string]any) *CallError { return checkPerm(d, c) }
 
-// ---- 参数转换辅助（syscall 参数来自 JSON，类型不确定） ----
+// ---- 参数转换辅助 ----
+//
+// 为什么需要这些：syscall 有两条路径——
+//   - 外部（HTTP/JSON）：参数是 map[string]any / []any
+//   - 内建（Go 直调）：参数是原始 Go 类型（map[string][]map[string]any 等）
+// 只按 JSON 形态断言会让内建调用静默失败（表现为"声明成功但界面没变化"）。
+// 所有 syscall handler 必须同时容忍两种形态，转换集中在这里。
+
+// toAnyMap 把任意 map 形态统一成 map[string]any。
+func toAnyMap(v any) map[string]any {
+	switch m := v.(type) {
+	case map[string]any:
+		return m
+	case map[string][]map[string]any:
+		out := map[string]any{}
+		for k, vv := range m {
+			out[k] = vv
+		}
+		return out
+	}
+	// 反射兜底：处理其它 map 形态（如 map[string][]Component）
+	rv := reflect.ValueOf(v)
+	if rv.Kind() == reflect.Map && rv.Type().Key().Kind() == reflect.String {
+		out := map[string]any{}
+		for _, k := range rv.MapKeys() {
+			out[k.String()] = rv.MapIndex(k).Interface()
+		}
+		return out
+	}
+	return nil
+}
+
+// toAnyList 把任意 slice 形态统一成 []any。
+func toAnyList(v any) []any {
+	if l, ok := v.([]any); ok {
+		return l
+	}
+	rv := reflect.ValueOf(v)
+	if rv.Kind() == reflect.Slice || rv.Kind() == reflect.Array {
+		out := make([]any, 0, rv.Len())
+		for i := 0; i < rv.Len(); i++ {
+			out = append(out, rv.Index(i).Interface())
+		}
+		return out
+	}
+	return nil
+}
 
 func str(v any, def string) string {
 	if s, ok := v.(string); ok {

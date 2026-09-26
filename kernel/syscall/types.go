@@ -86,6 +86,9 @@ var CallPermissions = map[string]Permission{
 	"ws.mount":        "route.mount",
 	"ui.declare":      "", // 只声明 UI，不改内核状态
 	"ui.withdraw":     "", // 撤销声明（服务停止时）
+	"action.register": "action.own",
+	"action.invoke":   "",
+	"action.list":     "",
 	"time.now":        "",
 	"rand.bytes":      "",
 	"hash.sha256":     "",

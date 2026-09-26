@@ -1,6 +1,9 @@
 package sdk
 
-import "encoding/json"
+import (
+	"context"
+	"encoding/json"
+)
 
 // 本文件补齐服务侧需要、但 Kernel 主接口未覆盖的 syscall 便捷方法。
 //
@@ -153,4 +156,18 @@ func stringify(v any) string {
 // 但服务仍需要一个受权限约束的统一入口。
 func CallGeneric(k Kernel, name string, args map[string]any) (map[string]any, error) {
 	return call(k, name, args)
+}
+
+// RegisterAction 把一个内建动作注册到内核（可由 UI 按钮触发）。
+//
+// 动作名必须带服务前缀（如 "deployer.deploy"），内核据此归属与授权。
+// 内核不知道动作做什么——它只负责按名字派发与权限检查。
+func RegisterAction(k Kernel, name string, h func(ctx context.Context, args map[string]any) (map[string]any, error)) error {
+	e, ok := k.(interface {
+		RegisterAction(string, func(context.Context, map[string]any) (map[string]any, error)) error
+	})
+	if !ok {
+		return errNotExtended(name)
+	}
+	return e.RegisterAction(name, h)
 }

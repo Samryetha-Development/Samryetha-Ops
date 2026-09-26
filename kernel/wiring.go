@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"samryetha/kernel/actions"
 	"samryetha/kernel/config"
 	"samryetha/kernel/cron"
 	"samryetha/kernel/fsops"
@@ -16,11 +17,12 @@ import (
 
 // wiring 汇总内核的扩展组件构造，保持 main 可读。
 type wiring struct {
-	Config *config.Tree
-	FS     *fsops.FS
-	Routes *route.Table
-	Cron   *cron.Scheduler
-	scopes []fsops.Scope
+	Config  *config.Tree
+	FS      *fsops.FS
+	Routes  *route.Table
+	Cron    *cron.Scheduler
+	Actions *actions.Registry
+	scopes  []fsops.Scope
 }
 
 // buildWiring 按配置构造扩展组件。
@@ -28,7 +30,7 @@ type wiring struct {
 // 文件访问范围从 etc/scopes.json 读取（而不是硬编码）：
 // 内核不知道"logs"是什么，它只知道"有个叫 logs 的范围，可读不可写"。
 func buildWiring(root string) (*wiring, error) {
-	w := &wiring{Routes: route.New(), Cron: cron.New()}
+	w := &wiring{Routes: route.New(), Cron: cron.New(), Actions: actions.New()}
 
 	tree, err := config.Open(root)
 	if err != nil {

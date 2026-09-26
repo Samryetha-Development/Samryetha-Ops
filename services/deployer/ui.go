@@ -8,6 +8,43 @@ import (
 	"samryetha/sdk"
 )
 
+// RegisterActions 把部署/回滚注册为可由 UI 触发的动作。
+//
+// 关键：内核不知道"部署"是什么，它只知道"deployer 注册了一个叫 deployer.deploy 的动作"。
+// 这是"内核保持领域中立"与"界面需要业务按钮"之间的正解。
+func (s *Service) RegisterActions(plans []Plan) error {
+	byID := map[string]Plan{}
+	for _, p := range plans {
+		byID[p.ID] = p
+	}
+
+	if err := s.K.(interface {
+		RegisterAction(name string, h func(ctx context.Context, args map[string]any) (map[string]any, error)) error
+	}).RegisterAction("deployer.deploy", func(ctx context.Context, args map[string]any) (map[string]any, error) {
+		id, _ := args["target"].(string)
+		plan, ok := byID[id]
+		if !ok {
+			return nil, fmt.Errorf("unknown target %q", id)
+		}
+		out := s.Deploy(ctx, plan)
+		return map[string]any{"state": out.State, "target": out.Target,
+			"from": out.From, "to": out.To, "error": out.Err}, nil
+	}); err != nil {
+		return err
+	}
+
+	return s.K.(interface {
+		RegisterAction(name string, h func(ctx context.Context, args map[string]any) (map[string]any, error)) error
+	}).RegisterAction("deployer.rollback", func(ctx context.Context, args map[string]any) (map[string]any, error) {
+		id, _ := args["target"].(string)
+		plan, ok := byID[id]
+		if !ok {
+			return nil, fmt.Errorf("unknown target %q", id)
+		}
+		return s.RollbackToPrevious(ctx, plan)
+	})
+}
+
 // DeclareUI 向内核外壳声明部署面板。
 //
 // 这是"控制台"的正确做法：服务声明"我要显示什么、有哪些按钮"，
@@ -94,7 +131,14 @@ func (s *Service) DeclareUI(ctx context.Context, plans []Plan, schedule map[stri
 		{"id": "deploy", "label": "部署", "order": 10},
 		{"id": "logs", "label": "日志", "order": 20},
 	}
-	return sdk.DeclareUI(s.K, slots, nav)
+	// 诊断：声明失败必须可见（此前失败被上层 warn 吞掉，表现为"页面什么都没有"）
+	if err := sdk.DeclareUI(s.K, slots, nav); err != nil {
+		_ = s.K.Log("warn", "deployer ui.declare failed: "+err.Error(), nil)
+		return err
+	}
+	_ = s.K.Log("info", fmt.Sprintf("deployer ui declared: %d cards, %d actions, %d sections",
+		len(cards), len(actions), len(sections)), nil)
+	return nil
 }
 
 // targetState 读取某目标最近一次部署的结果（来自内核事件流）。

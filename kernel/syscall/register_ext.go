@@ -230,6 +230,69 @@ func registerEvents2(t Table, d Deps) {
 	}
 }
 
+// registerActions 挂上"服务动作"机制。
+//
+// 为什么需要它：内核不知道"部署"是什么，但 UI 需要按钮能触发它。
+// 解法不是让内核认识部署，而是让**服务自己注册动作处理器**：
+//
+//	服务：action.register{name:"deployer.deploy", handler}
+//	UI：  点击 → /api/kernel/call{name:"action.invoke", args:{action:"deployer.deploy"}}
+//	内核：按名字找到处理器、检查权限、转发
+//
+// 内核全程只知道"有个叫 X 的动作"，不知道 X 做什么。
+func registerActions(t Table, d Deps) {
+	t["action.register"] = func(ctx context.Context, c Call) (map[string]any, *CallError) {
+		if e := allow(d, c, c.Args); e != nil {
+			return nil, e
+		}
+		if d.Actions == nil {
+			return nil, &CallError{Code: "unavailable", Message: "action registry not wired"}
+		}
+		name := str(c.Args["name"], "")
+		if name == "" {
+			return nil, &CallError{Code: "invalid_args", Message: "name required"}
+		}
+		// 动作名必须带来源前缀，避免两个服务抢同一个名字
+		prefix := c.Caller.Plugin + "."
+		if !strings.HasPrefix(name, prefix) {
+			return nil, &CallError{Code: "denied",
+				Message: fmt.Sprintf("action %q must be prefixed with %q", name, prefix)}
+		}
+		d.Actions.Register(name, c.Caller.Plugin)
+		return map[string]any{}, nil
+	}
+	t["action.invoke"] = func(ctx context.Context, c Call) (map[string]any, *CallError) {
+		name := str(c.Args["action"], "")
+		if name == "" {
+			return nil, &CallError{Code: "invalid_args", Message: "action required"}
+		}
+		if d.Actions == nil {
+			return nil, &CallError{Code: "unavailable", Message: "action registry not wired"}
+		}
+		owner, ok := d.Actions.Owner(name)
+		if !ok {
+			return nil, &CallError{Code: "not_found", Message: "unknown action " + name}
+		}
+		// 权限：调用者需要该动作所属服务的能力点（约定为 "action.<服务名>"）
+		if !d.Policy.Allows(d.Policy.RoleOf(c.Caller.Subject), "action."+owner) {
+			return nil, &CallError{Code: "denied",
+				Message: fmt.Sprintf("role %s lacks action.%s", d.Policy.RoleOf(c.Caller.Subject), owner)}
+		}
+		// 转发给注册该动作的服务；服务侧同步执行（内建）或经其自身机制（外部）
+		result, err := d.Actions.Invoke(ctx, name, c.Args)
+		if err != nil {
+			return nil, &CallError{Code: "action_failed", Message: err.Error()}
+		}
+		return result, nil
+	}
+	t["action.list"] = func(ctx context.Context, c Call) (map[string]any, *CallError) {
+		if d.Actions == nil {
+			return map[string]any{"actions": []any{}}, nil
+		}
+		return map[string]any{"actions": d.Actions.List()}, nil
+	}
+}
+
 // registerAuth 挂上主体查询。
 func registerAuth(t Table, d Deps) {
 	t["auth.public"] = func(ctx context.Context, c Call) (map[string]any, *CallError) {
