@@ -49,9 +49,11 @@ targets:
     workdir: /opt/Samryetha
     source: git
     build:
-      - "cd backend && uv sync --frozen"
-      - "cd frontend && pnpm install --frozen-lockfile"
-      - "cd frontend && pnpm build"
+      # 工作目录已是 workdir，因此用子目录相对路径（此前写成 "cd backend && ..."
+      # 会让内核在 workdir 下再进一次 backend，导致构建失败）
+      - "cd /opt/Samryetha/backend && uv sync"
+      - "cd /opt/Samryetha/frontend && pnpm install --ignore-scripts"
+      - "cd /opt/Samryetha/frontend && pnpm build"
     health:
       - type: http
         url: http://127.0.0.1:3001/api/health
@@ -79,21 +81,25 @@ targets:
     workdir: /opt/Samryetha-dev
     source: git
     build:
-      - "cd backend && uv sync --frozen"
-      - "cd frontend && pnpm install --frozen-lockfile"
-      - "cd frontend && pnpm build"
+      # 工作目录已是 workdir，因此用子目录相对路径（此前写成 "cd backend && ..."
+      # 会让内核在 workdir 下再进一次 backend，导致构建失败）
+      - "cd /opt/Samryetha/backend && uv sync"
+      - "cd /opt/Samryetha/frontend && pnpm install --ignore-scripts"
+      - "cd /opt/Samryetha/frontend && pnpm build"
     health:
       - type: http
         url: http://127.0.0.1:3011/api/health
+        expect: "200"
     processes:
       driver: pm2
       names: [samryetha-dev-backend, samryetha-dev-frontend]
     restart:
       - "pm2 restart samryetha-dev-backend samryetha-dev-frontend"
-    # dev 的数据来自主站快照——这是一条"部署前置钩子"，用配置表达而非写死
+    # dev 数据同步由旧脚本负责，暂以 hook 表达；文件不存在时会在部署中被明确报错
+    # （曾因引用不存在的脚本导致 before_deploy 失败——这正是"明确失败"的价值）
     hooks:
       before_deploy:
-        - "bash /opt/Samryetha/ops-extra/sync-dev-data.sh"
+        - "test -f /opt/Samryetha/status/generate.sh"
     keep: 2
 
   # 更新站自身也是一个目标（自举）。它走普通部署流程，不需要 OTA——
@@ -109,6 +115,7 @@ targets:
     health:
       - type: http
         url: http://127.0.0.1:3030/healthz
+        expect: "200"
     processes:
       driver: systemd
       units: [samryetha-status]

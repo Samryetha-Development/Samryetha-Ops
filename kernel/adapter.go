@@ -5,10 +5,18 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"samryetha/kernel/cron"
 	"samryetha/kernel/syscall"
 	"samryetha/kernel/task"
 	"samryetha/sdk"
 )
+
+// cronScheduler 是内核 cron 的最小接口（避免直接依赖具体类型）。
+type cronScheduler interface {
+	SetHook(name string, fn func())
+}
+
+var _ cronScheduler = (*cron.Scheduler)(nil)
 
 // 内建服务的主体身份。
 //
@@ -30,6 +38,9 @@ type syscallAdapter struct {
 	table   syscall.Table
 	plugin  string
 	subject string
+	// cron 让内建服务把函数绑定到定时任务（见 sdk.BindCron）。
+	// 只注册不绑定会造成"到点触发却什么都不做"的静默空转。
+	cron cronScheduler
 }
 
 func newSyscallAdapter(table syscall.Table, plugin string) *syscallAdapter {
@@ -233,3 +244,13 @@ func toStrList(v any) []string {
 }
 
 var _ = task.Step{}
+
+// SetCronHook 把动作绑定到已注册的定时任务（实现 sdk.cronHookSetter）。
+//
+// 这是"注册"与"动作"解耦的关键：cron 由内核负责到点触发，
+// 但"到点做什么"属于服务。缺了这一步，定时任务会按时触发却什么都不做。
+func (a *syscallAdapter) SetCronHook(name string, fn func()) {
+	if a.cron != nil {
+		a.cron.SetHook(name, fn)
+	}
+}

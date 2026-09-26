@@ -59,10 +59,13 @@ func (s *Service) Start(ctx context.Context) error {
 	if s.Schedule == "" {
 		s.Schedule = "*/1 * * * *" // 默认每分钟
 	}
-	// 通过内核注册定时任务：内核不理解"状态页"，只知道"到点跑这组步骤"
-	steps := []sdk.Step{{Name: "statuspage.probe", Argv: []string{"true"}}}
-	_, err := sdk.Cron(s.K, s.Schedule, "statuspage", steps)
-	if err != nil {
+	// 注册定时任务**并绑定探测动作**。
+	//
+	// 早前只注册未绑定，导致"到点触发却什么都不做"的静默空转——
+	// 这类问题在日志里几乎看不出来，所以统一用 BindCron 一步完成。
+	if _, err := sdk.BindCron(s.K, s.Schedule, "statuspage", func() {
+		s.RunOnce(context.Background())
+	}); err != nil {
 		return fmt.Errorf("register schedule: %w", err)
 	}
 	// 路由：/status.json 供外部消费；页面本体由外壳插槽呈现

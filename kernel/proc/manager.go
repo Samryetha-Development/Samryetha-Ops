@@ -29,6 +29,8 @@ type Proc struct {
 	// capture 为 true 时累积输出，供 Output() 读取
 	capture bool
 	output  []string
+	// pipes 由两个读取协程在结束时投递，Wait 等它以确保输出完整
+	pipes chan struct{}
 }
 
 // Manager 管理内核启动的进程集合。
@@ -83,26 +85,44 @@ func (m *Manager) spawn(argv []string, env map[string]string, cwd string, captur
 		return 0, err
 	}
 
-	p := &Proc{PID: cmd.Process.Pid, Argv: argv, Cwd: cwd, Started: time.Now(), cmd: cmd, done: make(chan struct{}), capture: capture}
+	p := &Proc{
+		PID: cmd.Process.Pid, Argv: argv, Cwd: cwd, Started: time.Now(), cmd: cmd,
+		done: make(chan struct{}), capture: capture,
+		// pipes 记录输出管道读取是否结束：Wait 必须等它，否则 capture 输出可能不完整。
+		// 这是真实竞态——进程退出与管道清空之间有窗口，早读会得到空输出。
+		pipes: make(chan struct{}, 2),
+	}
 	m.mu.Lock()
 	m.procs[p.PID] = p
 	m.mu.Unlock()
 
 	// 实时行输出（内核日志）；capture 模式额外累积到有界缓冲
-	go pipeLines(stdout, func(l string) {
-		m.onLine(p.PID, "stdout", l)
-		if capture {
-			m.appendOut(p, l)
-		}
-	})
-	go pipeLines(stderr, func(l string) {
-		m.onLine(p.PID, "stderr", l)
-		if capture {
-			m.appendOut(p, l)
-		}
-	})
-
 	go func() {
+		pipeLines(stdout, func(l string) {
+			m.onLine(p.PID, "stdout", l)
+			if capture {
+				m.appendOut(p, l)
+			}
+		})
+		p.pipes <- struct{}{}
+	}()
+	go func() {
+		pipeLines(stderr, func(l string) {
+			m.onLine(p.PID, "stderr", l)
+			if capture {
+				m.appendOut(p, l)
+			}
+		})
+		p.pipes <- struct{}{}
+	}()
+
+	// 关键顺序：先等两条输出管道读到 EOF，再调用 cmd.Wait()。
+	//
+	// 这是 os/exec 的硬性要求：cmd.Wait() 会关闭管道，若先 Wait，
+	// 读取协程可能拿不到已产生的数据（真实竞态：30 次并发捕获有 4 次空输出）。
+	go func() {
+		<-p.pipes // 等 stdout 读取结束
+		<-p.pipes // 等 stderr 读取结束
 		err := cmd.Wait()
 		m.mu.Lock()
 		if err != nil {
@@ -175,10 +195,11 @@ func (m *Manager) Wait(pid int, timeoutMs int) (int, error) {
 			return -1, fmt.Errorf("wait timeout after %dms", timeoutMs)
 		}
 	}
+	// 输出完整性由上面的 goroutine 保证（先读尽再 Wait）。
+	// done 关闭即意味着：管道已读尽、进程已回收、退出码已填好。
 	m.mu.RLock()
 	code := p.exit
 	m.mu.RUnlock()
-	// 回收记录：进程已退出，保留短时供 list 观察
 	return code, nil
 }
 

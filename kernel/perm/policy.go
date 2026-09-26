@@ -27,10 +27,14 @@ const (
 var builtinRoles = map[Role][]string{
 	RoleViewer: {
 		"log.read", "event.read", "proc.read", "task.read", "config.read", "store.own",
+		"fs.read", // 只读文件：查看日志/配置是观测的基本需求
 	},
 	RoleOperator: {
 		"log.read", "event.read", "proc.read", "task.read", "config.read", "store.own",
 		"event.emit", "proc.manage", "task.submit", "route.mount", "config.write",
+		// 文件写仍受 scope 白名单约束（见 kernel/fsops）——
+		// 能力点决定"能不能写"，scope 决定"能写哪里"，两者缺一不可。
+		"fs.read", "fs.write", "fs.list",
 	},
 	RoleAdmin: {"*"}, // 通配：全部能力
 }

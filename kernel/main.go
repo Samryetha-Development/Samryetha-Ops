@@ -179,6 +179,7 @@ func startServices(root string, table syscall.Table, bus *events.Bus, klog *kern
 
 	// syscall 侧适配器：把内核表暴露成 sdk.Kernel（内建服务走这条路）
 	k := newSyscallAdapter(table, "kernel")
+	k.cron = wire.Cron // 让内建服务能把动作绑定到定时任务
 
 	// 驱动注册
 	reg := drivers.NewRegistry()

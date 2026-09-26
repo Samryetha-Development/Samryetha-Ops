@@ -30,12 +30,36 @@ func (e extendErr) Error() string {
 func errNotExtended(name string) error { return extendErr{name} }
 
 // Cron 注册定时任务（内核不理解任务内容，只负责到点触发）。
+//
+// 注意：这只注册了"到点触发"，**动作仍需绑定**（见 SetCronHook）。
+// 若只注册不绑定，任务会按时触发却什么都不做——
+// 这种"静默空转"很难发现，因此推荐直接用 BindCron 一步完成。
 func Cron(k Kernel, spec, name string, steps []Step) (string, error) {
 	d, err := call(k, "task.cron", map[string]any{"spec": spec, "name": name, "steps": steps})
 	if err != nil {
 		return "", err
 	}
 	id, _ := d["job_id"].(string)
+	return id, nil
+}
+
+// cronHookSetter 由内核适配器实现，用于把动作绑定到已注册的定时任务。
+type cronHookSetter interface {
+	SetCronHook(name string, fn func())
+}
+
+// BindCron 注册定时任务**并绑定动作**（推荐入口）。
+//
+// 内建服务用这个；外部服务（跨进程）无法在核内存活函数，
+// 应改用"内核触发 → 通过 proc.spawn 调自己的 CLI"的方式（见文档）。
+func BindCron(k Kernel, spec, name string, fn func()) (string, error) {
+	id, err := Cron(k, spec, name, []Step{{Name: name, Argv: []string{"true"}}})
+	if err != nil {
+		return "", err
+	}
+	if setter, ok := k.(cronHookSetter); ok {
+		setter.SetCronHook(name, fn)
+	}
 	return id, nil
 }
 
