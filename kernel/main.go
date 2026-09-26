@@ -87,6 +87,7 @@ func main() {
 	klog := newKernelLog(4000)
 	bus := events.New(4096, nil)
 	policy := loadPolicy(*root)
+	authMode := loadAuthMode(*root)
 	procs := proc.NewManager(func(pid int, stream, line string) {
 		klog.add("debug", line, map[string]any{"pid": pid, "stream": stream})
 	})
@@ -247,7 +248,7 @@ func main() {
 		// 角色一律由策略按 subject 决定（perm.Policy.RoleOf）。
 		caller := syscall.CallerInfo{
 			Plugin:  strings.TrimSpace(firstNonEmpty(req.Plugin, r.Header.Get("X-Kernel-Plugin"), "external")),
-			Subject: trustedSubject(r, *root),
+			Subject: trustedSubject(r, authMode),
 			Roles:   nil,
 		}
 		data, cerr := h(r.Context(), syscall.Call{Name: req.Name, Args: req.Args, Caller: caller})
@@ -290,18 +291,45 @@ func firstNonEmpty(vals ...string) string {
 
 // trustedSubject 解析调用方身份。
 //
-// 生产路径：认证驱动（OIDC）在中间件里校验并注入，本函数只读取它放好的可信标头。
-// 开发路径：显式开启 KERNEL_TRUST_HEADERS=1 时才接受 X-Kernel-Subject，
+// 身份来源由配置决定（etc/auth.txt 的 mode），而不是散落的开关：
 //
-//	且仅当该身份已在策略白名单内才有意义（否则仍是 viewer）。
+//	proxy    受信反代/认证中间件注入 X-Kernel-Subject（生产推荐）
+//	header   直接接受 X-Kernel-Subject（仅供本机只读调试，须绑 127.0.0.1）
+//	none     无身份（一律 viewer，最小权限）
 //
-// 无论哪条路径，**角色都不来自请求**——那是提权的入口。
-func trustedSubject(r *http.Request, root string) string {
-	if os.Getenv("KERNEL_TRUST_HEADERS") == "1" {
+// 关键安全约束：**角色永远不来自请求**，只由策略按 subject 决定。
+// 认证（证明"你是这个 sub"）在 mode=proxy 时由前置中间件负责；
+// 内核只消费它放好的可信标头。
+func trustedSubject(r *http.Request, mode string) string {
+	switch mode {
+	case "header":
 		return strings.TrimSpace(r.Header.Get("X-Kernel-Subject"))
+	case "proxy":
+		return strings.TrimSpace(r.Header.Get("X-Kernel-Authenticated-Subject"))
+	default:
+		return ""
 	}
-	// 认证中间件注入的可信标头（内部约定，外部请求无法直接设置）
-	return strings.TrimSpace(r.Header.Get("X-Kernel-Authenticated-Subject"))
+}
+
+// loadAuthMode 从 etc/auth.txt 读取身份来源模式，默认 none（最小权限）。
+func loadAuthMode(root string) string {
+	b, err := os.ReadFile(filepath.Join(root, "etc", "auth.txt"))
+	if err != nil {
+		return "none"
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if strings.HasPrefix(line, "mode") {
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) == 2 {
+				return strings.TrimSpace(parts[1])
+			}
+		}
+	}
+	return "none"
 }
 
 // loadPolicy 从 etc/policy.yaml 的同构 JSON（或环境变量）加载角色映射。

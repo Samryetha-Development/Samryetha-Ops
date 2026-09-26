@@ -72,14 +72,17 @@ var CallPermissions = map[string]Permission{
 	"proc.signal":     "proc.manage",
 	"proc.wait":       "proc.manage",
 	"proc.list":       "proc.read",
+	"proc.output":     "proc.read",
 	"task.submit":     "task.submit",
 	"task.status":     "task.read",
+	"task.list":       "task.read",
 	"task.cancel":     "task.submit",
 	"task.once":       "task.submit",
 	"task.cron":       "task.submit",
 	"route.mount":     "route.mount",
 	"ws.mount":        "route.mount",
 	"ui.declare":      "", // 只声明 UI，不改内核状态
+	"ui.withdraw":     "", // 撤销声明（服务停止时）
 	"time.now":        "",
 	"rand.bytes":      "",
 	"hash.sha256":     "",
