@@ -34,25 +34,49 @@ func buildWiring(root string) (*wiring, error) {
 	if err != nil {
 		return nil, err
 	}
-	// 把 deploy.yaml 里**服务级**的配置段并入配置树。
+	w.Config = tree
+
+	// 把 deploy.yaml 的内容并入配置树（含 managed_root 与服务配置段）。
 	//
-	// 为什么需要这一步：deploy.yaml 是"部署描述"（含 targets/schedule 这类结构化数据），
-	// 而 config.get 读的是配置树（etc/config.json）。两者若各自独立，
-	// 服务就会遇到"我明明写在 deploy.yaml 里了，为什么 config.get 读不到"。
-	// 这里统一：deploy.yaml 中的服务配置段（statuspage/deployer/notify 等）
-	// 自动并入配置树，作为**默认值**（config.json 与 var/config.json 仍可覆盖）。
+	// 顺序很重要：scope 构造要读 managed_root，因此必须在建 scope **之前**完成合并。
+	// deploy.yaml 是"部署描述"，config.json 是"配置树"，两者本不该割裂——
+	// 服务不该关心某个设置写在哪个文件里。
 	if svcCfg, err := loadServiceConfig(root); err == nil {
 		tree.MergeDefaults(svcCfg)
 	}
-	w.Config = tree
 
 	w.FS = fsops.New(8 << 20) // 单次读取上限 8MB
-	// 默认范围：根目录下常见位置（存在才登记，避免拒绝启动）
+
+	// 被管理系统的根目录：内核自己的 root 是配置/状态目录（如 /opt/Samryetha/kernel），
+	// 但它**管理的东西**在别处（如 /opt/Samryetha）。两者混为一谈会让 scope 指向内核自身，
+	// 于是"写部署标记"就落到了没人看的目录里。
+	managed := root
+	if v, ok := tree.Get("managed_root"); ok {
+		if s, ok := v.(string); ok && s != "" {
+			managed = s
+		}
+	}
+	if managed == root {
+		// 未显式配置时：若父目录看起来是被管理的系统（含 backend/frontend），取父目录
+		parent := filepath.Dir(root)
+		if _, err := os.Stat(filepath.Join(parent, "backend")); err == nil {
+			managed = parent
+		}
+	}
+
+	// 默认范围（存在才登记，避免拒绝启动）
 	defaults := []fsops.Scope{
-		{Name: "logs", Root: filepath.Join(root, "logs"), Write: false},
+		// logs 只读：日志是观测对象，服务不该改写它。
+		{Name: "logs", Root: filepath.Join(managed, "logs"), Write: false},
 		{Name: "etc", Root: filepath.Join(root, "etc"), Write: false},
 		{Name: "var", Root: filepath.Join(root, "var"), Write: true},
-		{Name: "status", Root: filepath.Join(root, "status"), Write: true},
+		{Name: "status", Root: filepath.Join(managed, "status"), Write: true},
+		// markers 可写：部署标记（.last-deployed / .last-deployed-dev）就放在 logs 下，
+		// 状态页读的是这个路径，所以不能搬家——只能把"写标记"这一条授权单独拎出来。
+		//
+		// 为什么必须与 logs 分开：logs 是只读观测面，markers 是服务要写的状态。
+		// 合成一个 scope 就等于"为了写一个标记而允许改写所有日志"，权限无从收紧。
+		{Name: "markers", Root: filepath.Join(managed, "logs"), Write: true},
 	}
 	for _, s := range defaults {
 		if _, err := os.Stat(s.Root); err == nil {
@@ -134,6 +158,7 @@ func loadServiceConfig(root string) (map[string]any, error) {
 		"apiVersion": true, "project": true, "auth": true,
 		"plugins": true, "targets": true, "schedule": true,
 		"notify": true, "secrets": true,
+		// 注意：managed_root 不跳过——内核需要它来定位被管理系统
 	}
 	out := map[string]any{}
 	for k, v := range parsed {

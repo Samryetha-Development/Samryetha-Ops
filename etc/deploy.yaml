@@ -7,6 +7,10 @@
 
 apiVersion: kernel/v1
 
+# 被管理的系统根目录（内核自身在 /opt/Samryetha/kernel，但管理的东西在 /opt/Samryetha）。
+# 显式声明而不是靠推断：目录布局是可变的，推断会在布局变化时静默失效。
+managed_root: /opt/Samryetha
+
 project:
   id: samryetha
   name: Samryetha
@@ -70,7 +74,7 @@ targets:
     keep: 3                          # 保留最近 3 个版本用于回滚
     # 部署成功后写这个文件，状态页据此显示"已部署版本"。
     # 不写会导致"代码已更新、页面仍显示待部署"的错觉。
-    marker: "logs:.last-deployed"
+    marker: "markers:.last-deployed"
     # 迁移钩子：有迁移文件变更时才执行
     migrations:
       driver: command
@@ -104,7 +108,7 @@ targets:
       before_deploy:
         - "test -f /opt/Samryetha/status/generate.sh"
     keep: 2
-    marker: "logs:.last-deployed-dev"
+    marker: "markers:.last-deployed-dev"
 
   # 更新站自身也是一个目标（自举）。它走普通部署流程，不需要 OTA——
   # 这正是"把更新降级为用户态服务"换来的好处。
