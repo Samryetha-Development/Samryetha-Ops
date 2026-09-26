@@ -1,0 +1,142 @@
+# deploy.yaml —— 部署描述（示例：Samryetha 自己）
+#
+# 本文件是"项目的全部部署知识"。内核不认识这里的任何字段语义；
+# 是 services/deployer 读取它，并通过 syscall（proc/task/event/store）执行。
+#
+# 换一个项目 = 换一份本文件，不需要改任何内核或服务代码。
+
+apiVersion: kernel/v1
+
+project:
+  id: samryetha
+  name: Samryetha
+  # 代码来源。换 dir/s3/oci 只需换 driver。
+  source:
+    driver: git
+    repo: https://github.com/Samryetha-Development/Samryetha.git
+    # 凭证不入库：由 config 层从 secrets 注入（见 secrets: 段）
+    credentials: secrets/git
+
+# 认证：默认 provider 是 oidc（我们的 Lako）。
+# 立场：以不可变 sub 授权，而非邮箱（邮箱可变、可被抢注）。
+auth:
+  provider: oidc
+  issuer: https://auth.samryetha.com
+  client_id: samryetha-status
+  redirect_uri: https://status.samryetha.com/update/callback
+  roles:
+    # sub（Lako 用户 UUID）→ 角色
+    "a14dc53e-c7f3-48f0-94d5-4f3cf058ae78": admin
+
+# 启用的插件。UI 与 API 只呈现这里列出的能力——这就是"可插拔"的落点。
+plugins:
+  drivers:            # 与外部系统交互的适配器
+    - git
+    - pm2
+    - caddy
+    - http
+  services:           # 用户态服务（与 deployer 平级）
+    - deployer
+    - statuspage
+    - notifier
+    - inspector
+
+# 可部署目标。每个目标 = 一条独立的更新流水线。
+targets:
+  - id: main
+    enabled: true
+    branch: main
+    workdir: /opt/Samryetha
+    source: git
+    build:
+      - "cd backend && uv sync --frozen"
+      - "cd frontend && pnpm install --frozen-lockfile"
+      - "cd frontend && pnpm build"
+    health:
+      - type: http
+        url: http://127.0.0.1:3001/api/health
+        expect: "200"
+      - type: http
+        url: http://127.0.0.1:3000/
+        expect: "200"
+    processes:                       # 交给 pm2 驱动管理
+      driver: pm2
+      names: [samryetha-backend, samryetha-frontend]
+    restart:
+      - "pm2 reload samryetha-backend"
+      - "pm2 reload samryetha-frontend"
+    keep: 3                          # 保留最近 3 个版本用于回滚
+    # 迁移钩子：有迁移文件变更时才执行
+    migrations:
+      driver: command
+      detect: "git diff --name-only HEAD@{1} HEAD | grep -c '^backend/drizzle/' || true"
+      command: "cd backend && npm run migrate"
+      backup_before: true
+
+  - id: dev
+    enabled: true
+    branch: dev
+    workdir: /opt/Samryetha-dev
+    source: git
+    build:
+      - "cd backend && uv sync --frozen"
+      - "cd frontend && pnpm install --frozen-lockfile"
+      - "cd frontend && pnpm build"
+    health:
+      - type: http
+        url: http://127.0.0.1:3011/api/health
+    processes:
+      driver: pm2
+      names: [samryetha-dev-backend, samryetha-dev-frontend]
+    restart:
+      - "pm2 restart samryetha-dev-backend samryetha-dev-frontend"
+    # dev 的数据来自主站快照——这是一条"部署前置钩子"，用配置表达而非写死
+    hooks:
+      before_deploy:
+        - "bash /opt/Samryetha/ops-extra/sync-dev-data.sh"
+    keep: 2
+
+  # 更新站自身也是一个目标（自举）。它走普通部署流程，不需要 OTA——
+  # 这正是"把更新降级为用户态服务"换来的好处。
+  - id: ops
+    enabled: true
+    source: release                  # 来源是 GitHub Release，而非分支
+    workdir: /opt/Samryetha/status
+    binary:
+      asset: update-service
+      dest: update-service/bin/update-service
+      verify: sha256
+    health:
+      - type: http
+        url: http://127.0.0.1:3030/healthz
+    processes:
+      driver: systemd
+      units: [samryetha-status]
+    restart:
+      - "systemctl restart samryetha-status"
+    keep: 3
+
+# 调度：每个目标可独立开关与排期。
+schedule:
+  - target: main
+    cron: "*/5 * * * *"
+    enabled: true
+  - target: dev
+    cron: "*/5 * * * *"
+    enabled: true
+  - target: ops
+    cron: "*/15 * * * *"
+    enabled: true
+
+# 通知：多选，互不干扰。
+notify:
+  - driver: webhook
+    events: [deployment.failed, deployment.rolled_back]
+    url: secrets/notify/webhook
+  - driver: log
+    events: ["*"]
+
+# 密钥引用（真实值在 secrets/ 或环境变量，永不入库）。
+secrets:
+  git: env:GIT_TOKEN
+  notify/webhook: env:NOTIFY_WEBHOOK
