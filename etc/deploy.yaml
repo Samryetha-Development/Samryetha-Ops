@@ -81,11 +81,11 @@ targets:
     workdir: /opt/Samryetha-dev
     source: git
     build:
-      # 工作目录已是 workdir，因此用子目录相对路径（此前写成 "cd backend && ..."
-      # 会让内核在 workdir 下再进一次 backend，导致构建失败）
-      - "cd /opt/Samryetha/backend && uv sync"
-      - "cd /opt/Samryetha/frontend && pnpm install --ignore-scripts"
-      - "cd /opt/Samryetha/frontend && pnpm build"
+      # 必须指向 dev 自己的工作树。此前误写成 /opt/Samryetha（main 的路径），
+      # 会让"部署 dev"实际去构建 main 的代码——这类错误不会报错，只会悄悄做错事。
+      - "cd /opt/Samryetha-dev/backend && uv sync"
+      - "cd /opt/Samryetha-dev/frontend && pnpm install --ignore-scripts"
+      - "cd /opt/Samryetha-dev/frontend && pnpm build"
     health:
       - type: http
         url: http://127.0.0.1:3011/api/health

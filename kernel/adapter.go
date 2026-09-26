@@ -193,15 +193,22 @@ func (a *syscallAdapter) Status(taskID string) (sdk.TaskState, error) {
 	if err != nil {
 		return sdk.TaskState{}, err
 	}
-	m, _ := d["task"].(map[string]any)
-	if m == nil {
-		return sdk.TaskState{}, fmt.Errorf("no task state")
+	// task.status 返回的是 task.State 结构体（不是 map）——内建路径下它按原样传递，
+	// 因此这里要做类型分支；只断言 map 会让所有内建任务调用都报 "no task state"。
+	switch v := d["task"].(type) {
+	case task.State:
+		return sdk.TaskState{
+			ID: v.ID, Name: v.Name, State: v.State, Step: v.Current,
+			ExitCode: v.ExitCode, Log: v.Log, Err: v.Err,
+		}, nil
+	case map[string]any:
+		return sdk.TaskState{
+			ID: strOf(v["id"]), Name: strOf(v["name"]), State: strOf(v["state"]),
+			Step: strOf(v["current"]), ExitCode: toInt(v["exit_code"]),
+			Log: toStrList(v["log"]), Err: strOf(v["err"]),
+		}, nil
 	}
-	return sdk.TaskState{
-		ID: strOf(m["id"]), Name: strOf(m["name"]), State: strOf(m["state"]),
-		Step: strOf(m["current"]), ExitCode: toInt(m["exit_code"]),
-		Log: toStrList(m["log"]), Err: strOf(m["err"]),
-	}, nil
+	return sdk.TaskState{}, fmt.Errorf("no task state")
 }
 
 func (a *syscallAdapter) Cancel(taskID string) error {

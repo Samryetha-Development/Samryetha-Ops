@@ -195,8 +195,10 @@ func (s *Service) Deploy(ctx context.Context, p Plan) Outcome {
 	// 6) 构建
 	for i, cmd := range p.Build {
 		command := cmd
-		if !step(fmt.Sprintf("build[%d]", i+1), func() error { return s.shell(cx, command) }) {
-			return s.finish(out, start, "failed", "build failed")
+		idx := i + 1
+		if !step(fmt.Sprintf("build[%d]", idx), func() error { return s.shell(cx, command) }) {
+			return s.finish(out, start, "failed",
+				fmt.Sprintf("build failed at step %d: %s", idx, command))
 		}
 	}
 
@@ -287,9 +289,19 @@ func (s *Service) finish(out Outcome, start time.Time, state, errMsg string) Out
 	} else if state == "skipped" {
 		topic = "deployment.skipped"
 	}
+	// 把每一步的结果一起发出去：失败时能直接看到"哪一步、为什么"，
+	// 否则只有一个笼统的 "build failed"，排查要靠翻日志。
+	steps := make([]map[string]any, 0, len(out.Steps))
+	for _, st := range out.Steps {
+		m := map[string]any{"name": st.Name, "ok": st.OK, "ms": st.MS}
+		if st.Note != "" {
+			m["note"] = st.Note
+		}
+		steps = append(steps, m)
+	}
 	_, _ = s.K.Emit(topic, map[string]any{
 		"target": out.Target, "state": out.State, "from": out.From, "to": out.To,
-		"duration_ms": out.Duration, "error": out.Err,
+		"duration_ms": out.Duration, "error": out.Err, "steps": steps,
 	})
 	_ = s.K.Log("info", fmt.Sprintf("deploy %s → %s (%dms)", out.Target, out.State, out.Duration), nil)
 	_ = start
