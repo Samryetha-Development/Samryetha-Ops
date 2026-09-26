@@ -26,6 +26,9 @@ type Proc struct {
 	done    chan struct{}
 	exit    int
 	waitErr error
+	// capture 为 true 时累积输出，供 Output() 读取
+	capture bool
+	output  []string
 }
 
 // Manager 管理内核启动的进程集合。
@@ -45,6 +48,18 @@ func NewManager(onLine func(pid int, stream, line string)) *Manager {
 
 // Spawn 启动一个进程。返回 pid。
 func (m *Manager) Spawn(argv []string, env map[string]string, cwd string) (int, error) {
+	return m.spawn(argv, env, cwd, false)
+}
+
+// SpawnCapture 启动进程并**捕获**其合并输出，供调用方在 Wait 后读取。
+//
+// 这是通用能力（任何调用方都可能需要命令输出），因此属于内核而非某个驱动：
+// 内核知道"如何捕获一个进程的输出"，但不知道调用方拿它做什么。
+func (m *Manager) SpawnCapture(argv []string, env map[string]string, cwd string) (int, error) {
+	return m.spawn(argv, env, cwd, true)
+}
+
+func (m *Manager) spawn(argv []string, env map[string]string, cwd string, capture bool) (int, error) {
 	if len(argv) == 0 {
 		return 0, errors.New("empty argv")
 	}
@@ -68,14 +83,24 @@ func (m *Manager) Spawn(argv []string, env map[string]string, cwd string) (int, 
 		return 0, err
 	}
 
-	p := &Proc{PID: cmd.Process.Pid, Argv: argv, Cwd: cwd, Started: time.Now(), cmd: cmd, done: make(chan struct{})}
+	p := &Proc{PID: cmd.Process.Pid, Argv: argv, Cwd: cwd, Started: time.Now(), cmd: cmd, done: make(chan struct{}), capture: capture}
 	m.mu.Lock()
 	m.procs[p.PID] = p
 	m.mu.Unlock()
 
-	// 实时行输出（内核日志）
-	go pipeLines(stdout, func(l string) { m.onLine(p.PID, "stdout", l) })
-	go pipeLines(stderr, func(l string) { m.onLine(p.PID, "stderr", l) })
+	// 实时行输出（内核日志）；capture 模式额外累积到有界缓冲
+	go pipeLines(stdout, func(l string) {
+		m.onLine(p.PID, "stdout", l)
+		if capture {
+			m.appendOut(p, l)
+		}
+	})
+	go pipeLines(stderr, func(l string) {
+		m.onLine(p.PID, "stderr", l)
+		if capture {
+			m.appendOut(p, l)
+		}
+	})
 
 	go func() {
 		err := cmd.Wait()
@@ -94,6 +119,27 @@ func (m *Manager) Spawn(argv []string, env map[string]string, cwd string) (int, 
 	}()
 
 	return p.PID, nil
+}
+
+// appendOut 追加捕获输出（有界，防长任务撑爆内存）。
+func (m *Manager) appendOut(p *Proc, line string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p.output = append(p.output, line)
+	if len(p.output) > 4000 {
+		p.output = p.output[len(p.output)-4000:]
+	}
+}
+
+// Output 返回捕获的输出（仅 SpawnCapture 启动的进程有值）。
+func (m *Manager) Output(pid int) (string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	p, ok := m.procs[pid]
+	if !ok {
+		return "", fmt.Errorf("pid %d not managed", pid)
+	}
+	return strings.Join(p.output, "\n"), nil
 }
 
 // Signal 发送信号（名称：term/kill/int/hup）。

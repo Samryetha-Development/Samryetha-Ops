@@ -27,6 +27,7 @@ import (
 	"samryetha/kernel/store"
 	"samryetha/kernel/syscall"
 	"samryetha/kernel/task"
+	"samryetha/kernel/ui"
 )
 
 func env(k, def string) string {
@@ -134,8 +135,9 @@ func main() {
 		log.Fatalf("kernel boot error: %v", bootErr)
 	}
 
+	shell := ui.NewShell()
 	table := syscall.Register(syscall.Deps{
-		Bus: bus, Procs: procs, Tasks: tasks, Store: st, Policy: policy,
+		Bus: bus, Procs: procs, Tasks: tasks, Store: st, Policy: policy, UI: shell,
 		Log: func(level, msg string, fields map[string]any) { klog.add(level, msg, fields) },
 	})
 
@@ -144,6 +146,29 @@ func main() {
 	// ---- 内核自身的最小 API ----
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("ok"))
+	})
+	// 前端外壳：只渲染布局与插槽，业务内容来自各服务的 ui.declare
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/" {
+			http.NotFound(w, r)
+			return
+		}
+		meta := map[string]any{"syscallVersion": syscall.Version,
+			"note": "kernel has no domain knowledge; services provide features"}
+		data := ui.RenderData{
+			Title: "Samryetha control", Subtitle: "kernel + services",
+			Nav: shell.Nav(), Sources: shell.Sources(), KernelMeta: meta,
+		}
+		if !outcome.Ready {
+			data.Rescue = &ui.RescueInfo{Reason: outcome.Reason, Phase: string(outcome.Phase), Notes: outcome.Notes}
+		}
+		html, err := shell.Render(data)
+		if err != nil {
+			http.Error(w, err.Error(), 500)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = w.Write([]byte(html))
 	})
 	mux.HandleFunc("/api/kernel/meta", func(w http.ResponseWriter, r *http.Request) {
 		names := make([]string, 0, len(table))
@@ -163,7 +188,20 @@ func main() {
 		writeJSON(w, 200, map[string]any{"items": bus.History(r.URL.Query().Get("topic"), 0, 300)})
 	})
 	mux.HandleFunc("/api/kernel/log", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, 200, map[string]any{"items": klog.tail(500)})
+		items := klog.tail(500)
+		if src := r.URL.Query().Get("source"); src != "" {
+			filtered := make([]kvLine, 0, len(items))
+			for _, it := range items {
+				if it.Meta == nil {
+					continue
+				}
+				if p, _ := it.Meta["plugin"].(string); p == src {
+					filtered = append(filtered, it)
+				}
+			}
+			items = filtered
+		}
+		writeJSON(w, 200, map[string]any{"items": items})
 	})
 	mux.HandleFunc("/api/kernel/procs", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"procs": procs.List()})

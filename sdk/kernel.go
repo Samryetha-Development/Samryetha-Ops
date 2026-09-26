@@ -29,6 +29,9 @@ type Kernel interface {
 	ConfigGet(path string) (any, error)
 	// 进程（内核原语，领域中立）
 	Spawn(argv []string, env map[string]string, cwd string) (int, error)
+	// SpawnCapture 启动并捕获合并输出，Wait 后用 Output 取回。
+	SpawnCapture(argv []string, env map[string]string, cwd string) (int, error)
+	Output(pid int) (string, error)
 	Signal(pid int, sig string) error
 	Wait(pid int, timeoutMs int) (int, error)
 	List() ([]ProcInfo, error)

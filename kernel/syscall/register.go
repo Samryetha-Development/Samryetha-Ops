@@ -18,6 +18,7 @@ import (
 	"samryetha/kernel/proc"
 	"samryetha/kernel/store"
 	"samryetha/kernel/task"
+	"samryetha/kernel/ui"
 )
 
 // Deps 是注册 syscall 所需的内核组件。
@@ -27,7 +28,53 @@ type Deps struct {
 	Tasks  *task.Scheduler
 	Store  *store.Store
 	Policy *perm.Policy
+	UI     *ui.Shell
 	Log    func(level, msg string, fields map[string]any)
+}
+
+// buildComponent 把 JSON 声明转成受限组件（只认白名单字段，防止任意结构穿透）。
+func buildComponent(m map[string]any) ui.Component {
+	c := ui.Component{
+		Kind: str(m["kind"], ""), ID: str(m["id"], ""), Title: str(m["title"], ""),
+		Label: str(m["label"], ""), Text: str(m["text"], ""), Value: str(m["value"], ""),
+		Tone: str(m["tone"], ""), Order: int(i64(m["order"], 0)),
+	}
+	if arr, ok := m["items"].([]any); ok {
+		for _, x := range arr {
+			if im, ok := x.(map[string]any); ok {
+				c.Items = append(c.Items, ui.Item{
+					Key: str(im["key"], ""), Label: str(im["label"], ""),
+					Value: str(im["value"], ""), Text: str(im["text"], ""),
+					At: i64(im["at"], 0), Tone: str(im["tone"], ""),
+				})
+			}
+		}
+	}
+	if arr, ok := m["fields"].([]any); ok {
+		for _, x := range arr {
+			if fm, ok := x.(map[string]any); ok {
+				c.Fields = append(c.Fields, ui.Field{
+					Key: str(fm["key"], ""), Label: str(fm["label"], ""),
+					Type: str(fm["type"], "text"), Value: str(fm["value"], ""),
+					Help: str(fm["help"], ""),
+				})
+			}
+		}
+	}
+	if arr, ok := m["bars"].([]any); ok {
+		for _, x := range arr {
+			c.Bars = append(c.Bars, float64(i64(x, 0)))
+		}
+	}
+	c.Confirm = str(m["confirm"], "")
+	if am, ok := m["action"].(map[string]any); ok {
+		c.Action = &ui.Action{Kind: str(am["kind"], ""), Target: str(am["target"], ""),
+			Method: str(am["method"], ""), Confirm: str(am["confirm"], ""), Body: str(am["body"], "")}
+		if c.Confirm == "" {
+			c.Confirm = c.Action.Confirm
+		}
+	}
+	return c
 }
 
 // Register 构建 syscall 表。
@@ -130,11 +177,30 @@ func Register(d Deps) Table {
 		if len(argv) == 0 {
 			return nil, &CallError{Code: "invalid_args", Message: "argv required"}
 		}
-		pid, err := d.Procs.Spawn(argv, strMap(c.Args["env"]), str(c.Args["cwd"], ""))
+		env := strMap(c.Args["env"])
+		cwd := str(c.Args["cwd"], "")
+		var pid int
+		var err error
+		// capture=true 时累积输出，可用 proc.output 取回（通用能力，非驱动专属）
+		if b, _ := c.Args["capture"].(bool); b {
+			pid, err = d.Procs.SpawnCapture(argv, env, cwd)
+		} else {
+			pid, err = d.Procs.Spawn(argv, env, cwd)
+		}
 		if err != nil {
 			return nil, &CallError{Code: "spawn_failed", Message: err.Error()}
 		}
 		return map[string]any{"pid": pid}, nil
+	}
+	t["proc.output"] = func(ctx context.Context, c Call) (map[string]any, *CallError) {
+		if e := allow(c, c.Args); e != nil {
+			return nil, e
+		}
+		out, err := d.Procs.Output(int(i64(c.Args["pid"], 0)))
+		if err != nil {
+			return nil, &CallError{Code: "not_found", Message: err.Error()}
+		}
+		return map[string]any{"output": out}, nil
 	}
 	t["proc.signal"] = func(ctx context.Context, c Call) (map[string]any, *CallError) {
 		if e := allow(c, c.Args); e != nil {
@@ -198,6 +264,49 @@ func Register(d Deps) Table {
 			return nil, e
 		}
 		return map[string]any{"tasks": d.Tasks.List()}, nil
+	}
+
+	// ---- UI 声明（外壳按插槽渲染；插件不注入任意 DOM） ----
+	t["ui.declare"] = func(ctx context.Context, c Call) (map[string]any, *CallError) {
+		if e := allow(c, c.Args); e != nil {
+			return nil, e
+		}
+		if d.UI == nil {
+			return nil, &CallError{Code: "unavailable", Message: "ui registry not wired"}
+		}
+		slotsRaw, _ := c.Args["slots"].(map[string]any)
+		slots := map[string][]ui.Component{}
+		for slot, arr := range slotsRaw {
+			list, _ := arr.([]any)
+			for _, x := range list {
+				if m, ok := x.(map[string]any); ok {
+					slots[slot] = append(slots[slot], buildComponent(m))
+				}
+			}
+		}
+		var nav []ui.NavItem
+		if arr, ok := c.Args["nav"].([]any); ok {
+			for _, x := range arr {
+				if m, ok := x.(map[string]any); ok {
+					nav = append(nav, ui.NavItem{
+						ID: str(m["id"], ""), Label: str(m["label"], ""),
+						Icon: str(m["icon"], ""), Order: int(i64(m["order"], 0)),
+						Href: str(m["href"], ""),
+					})
+				}
+			}
+		}
+		d.UI.Declare(&ui.Declaration{Source: c.Caller.Plugin, Slots: slots, Nav: nav})
+		return map[string]any{}, nil
+	}
+	t["ui.withdraw"] = func(ctx context.Context, c Call) (map[string]any, *CallError) {
+		if e := allow(c, c.Args); e != nil {
+			return nil, e
+		}
+		if d.UI != nil {
+			d.UI.Withdraw(c.Caller.Plugin)
+		}
+		return map[string]any{}, nil
 	}
 
 	// ---- 杂项（内核提供，避免插件各自造不安全实现） ----
