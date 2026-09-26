@@ -1,0 +1,58 @@
+name: Kernel checks
+
+# 内核项目的核心主张都无法靠"看起来对"来保证：
+#   - 内核不知道更新为何物（不变量）
+#   - syscall 的实现与权限表一致（契约）
+#   - 配置里引用的路径彼此自洽（cfgcheck）
+# 这些检查必须在每次推送时自动跑，否则主张就会悄悄腐化。
+#
+# 触发：任何 push / PR（不只是改动 update-service 时）
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Kernel invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: gofmt
+        run: |
+          test -z "$(gofmt -l .)" || { echo "未格式化:"; gofmt -l .; exit 1; }
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go build
+        run: go build ./...
+
+      - name: syscall contract
+        run: python3 scripts/check-syscall-contract.py
+
+      - name: kernel invariants
+        run: python3 scripts/check-kernel-invariant.py
+
+      - name: deploy.yaml self-consistency
+        run: go run ./cmd/cfgcheck
+
+      - name: service-level checks (update-service)
+        working-directory: update-service
+        run: |
+          test -z "$(gofmt -l .)" || { echo "未格式化:"; gofmt -l .; exit 1; }
+          go vet ./...

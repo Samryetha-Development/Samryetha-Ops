@@ -146,3 +146,11 @@ func stringify(v any) string {
 		return string(b)
 	}
 }
+
+// CallGeneric 是对 call 的公开包装：服务需要调用未封装成便捷函数的 syscall 时使用。
+//
+// 存在意义：新增 syscall 不必立刻进 sdk 接口（那会破坏插件兼容），
+// 但服务仍需要一个受权限约束的统一入口。
+func CallGeneric(k Kernel, name string, args map[string]any) (map[string]any, error) {
+	return call(k, name, args)
+}
