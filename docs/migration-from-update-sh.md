@@ -77,8 +77,36 @@ curl -s localhost:3040/api/kernel/events?topic=deployment
 crontab /tmp/crontab.backup.<ts>
 ```
 
+## 内核自更新（kernel_self_update.sh）
+
+内核**不能**通过 deployer 更新自己：deployer 跑在内核进程内，自更新脚本一旦重启内核，
+部署进程就被杀，标记 / 健康门 / 完成事件都不会发生——控制台会显示一个"永不结束"的部署。
+
+因此内核更新走**外部调度**的独立脚本 `kernel_self_update.sh`：
+
+```
+下载 Release(kernel + kernel.sha256) → 校验 sha256 → 安装前预检
+  → 备份并原子替换 → systemctl restart samryetha-kernel → 健康门 → 失败自动回滚 → 写标记
+```
+
+其中**预检**不可省：内核起不来 = 控制台没了，连救都难，所以在替换前先用新二进制
+在临时端口起一次，确认它真能提供 `/healthz`。
+
+```bash
+/opt/Samryetha/kernel/scripts/kernel_self_update.sh --status   # 看状态
+/opt/Samryetha/kernel/scripts/kernel_self_update.sh            # 检查并更新
+/opt/Samryetha/kernel/scripts/kernel_self_update.sh --force    # 强制重装
+```
+
+是否用 systemd timer 自动执行是一个**策略决定**（自动更新"调度器本身"风险较高），
+默认不启用。
+
 ## 已知待办
 
 - `deploy.yaml` 里的构建/重启命令仍需与服务器实际流程逐条对齐
 - dev 数据同步（旧 `sync_dev_data`）尚未迁移为独立服务或 hook 脚本
-- `ops` 目标的 `release` 来源驱动尚未实现（当前仍由旧 `ops_self_update.sh` 负责）
+- `source: release` 的**来源驱动仍未实现**。`ops` 目标已停用：它的组件
+  `samryetha-status` 早已退役，健康检查指向的 `:3030` 长期不可达，因此留着只会
+  在面板上永久报假故障。将来需要"从 Release 取产物"的目标时，先实现该驱动
+- deployer 的面板采集里仍有 Samryetha 专属路径（`/opt/Samryetha/...`）；
+  通用化时应改为配置驱动，而不是写死在服务里
