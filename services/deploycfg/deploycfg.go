@@ -96,6 +96,7 @@ func Load(path string) (*File, error) {
 func toPlan(m map[string]any) deployer.Plan {
 	p := deployer.Plan{
 		ID:      str(m["id"]),
+		Enabled: m["enabled"] != false,
 		Branch:  str(m["branch"]),
 		WorkDir: str(m["workdir"]),
 		Build:   toStrSlice(m["build"]),

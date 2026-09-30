@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"samryetha/sdk"
 )
@@ -151,6 +152,31 @@ func (s *Service) DeclareFullUI(ctx context.Context, plans []Plan, schedule map[
 }
 
 // ---- 数据采集（全部经内核 syscall，不直接读文件/起进程）----
+
+// StartUIRefresh 周期性重声明 UI。
+//
+// 为什么需要：内核只在服务启动时收集一次面板数据，否则控制台会永远显示
+// 开机那一刻的进程/磁盘/提交快照——"看起来有数据，其实是旧的"，比空着更误导。
+// Declare 是按 source 覆盖的（见 kernel/ui/shell.go），因此重复声明是安全的。
+func (s *Service) StartUIRefresh(ctx context.Context, plans []Plan, schedule map[string]string, interval time.Duration) {
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	go func() {
+		t := time.NewTicker(interval)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				if err := s.DeclareFullUI(ctx, plans, schedule); err != nil {
+					_ = s.K.Log("warn", "deployer ui refresh failed: "+err.Error(), nil)
+				}
+			}
+		}
+	}()
+}
 
 type procStat struct {
 	Name, State, Mem string
@@ -325,30 +351,24 @@ func (s *Service) configNotice(ctx context.Context) string {
 	return ""
 }
 
-// runCapture 经内核跑命令并取回输出（服务不直接起进程）。
+// runCapture 经内核跑命令并取回**真实 stdout**。
+//
+// 这里曾经用 task.submit 之后的 st.Log 当输出——但那是"步骤轨迹"（▶/✓），
+// 不是命令的 stdout。后果是所有依赖它的采集（进程/磁盘/提交/备份/审计/配置提醒）
+// 都拿到轨迹文本，解析失败后整块面板消失，控制台只剩概览/操作/设置/日志。
+// 取输出必须用 proc.spawn(capture=true) + proc.output。
 func (s *Service) runCapture(ctx context.Context, cmd string) (string, error) {
-	taskID, err := s.K.Submit("capture", []sdk.Step{{
-		Name: "capture", Argv: []string{"sh", "-lc", cmd}, Timeout: 30000,
-	}}, 40000)
+	pid, err := s.K.SpawnCapture([]string{"sh", "-lc", cmd}, nil, "")
 	if err != nil {
 		return "", err
 	}
-	for i := 0; i < 200; i++ {
-		st, err := s.K.Status(taskID)
-		if err != nil {
-			return "", err
-		}
-		switch st.State {
-		case "succeeded":
-			return strings.Join(st.Log, "\n"), nil
-		case "failed", "canceled":
-			return "", fmt.Errorf("%s", st.Err)
-		}
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		default:
-		}
+	code, err := s.K.Wait(pid, 30000)
+	if err != nil {
+		return "", err
 	}
-	return "", fmt.Errorf("capture timeout")
+	out, _ := s.K.Output(pid)
+	if code != 0 {
+		return out, fmt.Errorf("capture exit %d", code)
+	}
+	return out, nil
 }

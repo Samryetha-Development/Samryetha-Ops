@@ -63,6 +63,7 @@ func (s *Service) release(id string) {
 // Plan 描述一次部署（来自 deploy.yaml 的 target）。
 type Plan struct {
 	ID      string
+	Enabled bool // 目标级开关：false 表示不注册调度、也不出现在控制台
 	Branch  string
 	WorkDir string
 

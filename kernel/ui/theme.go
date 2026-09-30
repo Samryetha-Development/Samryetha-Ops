@@ -268,9 +268,23 @@ async function loadLog(){
 }
 document.getElementById('log-refresh')?.addEventListener('click',loadLog);
 document.getElementById('log-src')?.addEventListener('change',loadLog);
-fetch('/api/kernel/meta').then(r=>r.json()).then(m=>{
-  const el=document.getElementById('kernel-meta'); if(el) el.textContent=(m.syscalls||[]).length+' syscalls';
-}).catch(()=>{});
+// 顶部状态胶囊必须反映真实连接状态。
+// 此前它只是一段静态 HTML（永远显示"连接中"），既不反映成功也不反映失败——
+// 一个只会说"正在连接"的指示灯，比没有更误导。
+const live=document.getElementById('live');
+async function ping(){
+  try{
+    const r=await fetch('/api/kernel/meta',{cache:'no-store'});
+    if(r.status===401){ if(live){live.textContent='需登录';live.className='pill warn';} return; }
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const m=await r.json();
+    const el=document.getElementById('kernel-meta'); if(el) el.textContent=(m.syscalls||[]).length+' syscalls';
+    if(live){live.textContent='已连接';live.className='pill ok';}
+  }catch(e){
+    if(live){live.textContent='未连接';live.className='pill err';}
+  }
+}
+ping(); setInterval(ping, 30000);
 </script>
 </body>
 </html>

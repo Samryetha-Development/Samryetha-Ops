@@ -255,6 +255,13 @@ func startServices(root string, table syscall.Table, bus *events.Bus, klog *kern
 	// deployer：为每个 target 注册定时部署任务
 	dep := deployer.New(mkAdapter("deployer"), reg)
 	for _, t := range cfg.Targets {
+		// 目标级开关必须真正生效：此前 deploycfg 只对 schedule 读 enabled，
+		// target 上的 enabled 被静默忽略（写了 false 也照跑）。停用的目标不注册
+		// 调度、不出现在控制台，这样"停用"才是一个可信的状态。
+		if !t.Enabled {
+			klog.add("info", "target "+t.ID+" is disabled; not scheduling it", nil)
+			continue
+		}
 		// 进程驱动按配置实例化
 		switch t.ProcessDriver {
 		case "pm2":
@@ -286,9 +293,13 @@ func startServices(root string, table syscall.Table, bus *events.Bus, klog *kern
 			klog.add("info", fmt.Sprintf("scheduled %s (%s)", t.ID, job.Cron), nil)
 		}
 	}
-	// 收集全部计划，供动作注册与 UI 声明使用
+	// 收集全部计划，供动作注册与 UI 声明使用。
+	// 停用的目标同样排除：否则控制台会出现"点了必然失败"的按钮，比没有按钮更误导。
 	var allPlans []deployer.Plan
 	for _, t := range cfg.Targets {
+		if !t.Enabled {
+			continue
+		}
 		allPlans = append(allPlans, t)
 	}
 	scheduleMap := map[string]string{}
@@ -303,6 +314,15 @@ func startServices(root string, table syscall.Table, bus *events.Bus, klog *kern
 		log.Printf("deployer ui declare failed: %v", err)
 		klog.add("warn", "deployer ui declare failed: "+err.Error(), nil)
 	}
+	// 面板数据不能只采一次：否则控制台永远显示开机那一刻的进程/磁盘/提交快照。
+	// 间隔可配（deployer.ui_refresh_seconds），默认 60s。
+	uiRefresh := time.Minute
+	if v, ok := wire.Config.Get("deployer.ui_refresh_seconds"); ok {
+		if f, ok := v.(float64); ok && f > 0 {
+			uiRefresh = time.Duration(f) * time.Second
+		}
+	}
+	dep.StartUIRefresh(context.Background(), allPlans, scheduleMap, uiRefresh)
 	loaded = append(loaded, "deployer")
 
 	// statuspage：按 target 生成观测目标

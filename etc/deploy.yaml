@@ -122,11 +122,25 @@ targets:
     keep: 2
     marker: "markers:.last-deployed-dev"
 
-  # 更新站自身也是一个目标（自举）。它走普通部署流程，不需要 OTA——
-  # 这正是"把更新降级为用户态服务"换来的好处。
+  # ops：曾用于自举更新"独立控制台"（update-service + samryetha-status）。
+  #
+  # 现已**停用**，原因是配置与事实不符，继续留着只会让面板永久报假故障：
+  #   1. samryetha-status 服务已被 disable（旧独立控制台退役，控制台改由内核提供）；
+  #      它的健康检查 http://127.0.0.1:3030/healthz 因此永远是 failed。
+  #   2. source: release 的驱动从未实现，所以这个目标即使启用也只会失败。
+  #   3. 更重要的是：**内核不能通过 deployer 更新自己**。deployer 跑在内核进程内，
+  #      自更新脚本一重启内核，部署进程就被杀，标记/健康门/完成事件都不会发生——
+  #      控制台会显示一个永不结束的部署。因此内核更新必须由**外部调度**负责。
+  #
+  # 现在的做法：内核更新用 scripts/kernel_self_update.sh（下载 Release → 校验
+  # sha256 → 安装前预检 → 原子替换 → 重启 → 健康门 → 失败回滚 → 写标记），
+  # 由外部定时器或手工触发，见 docs/migration-from-update-sh.md。
+  #
+  # 保留本条目为 enabled:false 是为了让它和调度都明确"不再运行"，
+  # 而不是留一个看起来在工作的失效目标。
   - id: ops
-    enabled: true
-    source: release                  # 来源是 GitHub Release，而非分支
+    enabled: false
+    source: release                # 注意：release 来源驱动尚未实现
     workdir: /opt/Samryetha/status
     binary:
       asset: update-service
@@ -172,9 +186,11 @@ schedule:
   - target: dev
     cron: "*/5 * * * *"
     enabled: true
+  # ops 已停用（见上面 target 的说明）。保留条目并置 false，
+  # 让它明确"不再调度"，而不是留一个会一直失败的任务。
   - target: ops
     cron: "*/15 * * * *"
-    enabled: true
+    enabled: false
 
 # 通知：多选，互不干扰。
 notify:
