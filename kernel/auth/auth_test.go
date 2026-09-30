@@ -366,13 +366,22 @@ func TestOIDCRejectsDisallowedSubject(t *testing.T) {
 	defer srv.Close()
 
 	c := noRedirectClient()
-	resp, _ := c.Get(srv.URL + "/update/auth/login")
-	authURL, _ := url.Parse(resp.Header.Get("Location"))
+	resp, err := c.Get(srv.URL + "/update/auth/login")
+	if err != nil {
+		t.Fatal(err)
+	}
+	authURL, err := url.Parse(resp.Header.Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	resp.Body.Close()
 	st := authURL.Query().Get("state")
 	idp.challengeByCode["c1"] = authURL.Query().Get("code_challenge")
 
-	resp, _ = c.Get(srv.URL + "/update/callback?code=c1&state=" + url.QueryEscape(st))
+	resp, err = c.Get(srv.URL + "/update/callback?code=c1&state=" + url.QueryEscape(st))
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("未授权主体应 403，实际 %d", resp.StatusCode)

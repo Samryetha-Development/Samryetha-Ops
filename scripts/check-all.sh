@@ -19,10 +19,18 @@ if [ -z "$(gofmt -l . 2>/dev/null)" ]; then ok "格式一致"; else
   gofmt -l . | sed 's/^/    /'; bad "有未格式化文件"; fi
 
 step "go vet"
-if go vet ./... 2>&1 | tee /tmp/vet.out | grep -q .; then bad "vet 报告问题"; cat /tmp/vet.out | sed 's/^/    /'; else ok "vet 通过"; fi
+# 注意：不要写成 `go vet ./... | tee f | grep -q .`。
+# 配合 `set -o pipefail`，grep -q 命中后提前退出会让 tee 收到 SIGPIPE，
+# 整条管道被判为失败——于是"vet 真有报错"时脚本反而输出"通过"。
+# 检查必须依据退出码本身。
+if ! go vet ./... >/tmp/vet.out 2>&1; then
+  bad "vet 报告问题"; sed 's/^/    /' /tmp/vet.out
+else ok "vet 通过"; fi
 
 step "go build"
-if go build ./... 2>&1 | tee /tmp/build.out | grep -q .; then bad "编译失败"; cat /tmp/build.out | sed 's/^/    /'; else ok "编译通过"; fi
+if ! go build ./... >/tmp/build.out 2>&1; then
+  bad "编译失败"; sed 's/^/    /' /tmp/build.out
+else ok "编译通过"; fi
 
 step "syscall 契约（实现 vs 权限表）"
 python3 scripts/check-syscall-contract.py || bad "契约不一致"
@@ -43,8 +51,9 @@ step "go test（含 -race：并发缺陷只有靠竞态检测才抓得到）"
 # 为什么必须开 -race：曾有一个普通 map 被 cron 起的多个 goroutine 并发写，
 # 平时编译/运行都"看起来正常"，生产上却以 fatal error 反复崩溃。
 # 这类缺陷不靠 -race 就只能在线上暴露。
-if go test -race -count=1 ./... 2>&1 | tee /tmp/test.out | grep -qE "^(FAIL|--- FAIL)"; then
-  bad "测试失败"; sed 's/^/    /' /tmp/test.out; else ok "测试通过（-race）"; fi
+if ! go test -race -count=1 ./... >/tmp/test.out 2>&1; then
+  bad "测试失败"; sed 's/^/    /' /tmp/test.out
+else ok "测试通过（-race）"; fi
 
 printf '\n'
 if [ "$fail" -eq 0 ]; then echo "全部检查通过 ✓"; else echo "存在失败项 ✗"; fi
