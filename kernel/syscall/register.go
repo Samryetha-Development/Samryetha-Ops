@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
 
@@ -299,12 +300,24 @@ func Register(d Deps) Table {
 			return nil, &CallError{Code: "unavailable", Message: "ui registry not wired"}
 		}
 		slots := map[string][]ui.Component{}
+		var unknown []string
 		for slot, arr := range toAnyMap(c.Args["slots"]) {
+			// 声明外壳不认识的插槽 = 内容永远不会出现。必须显式告警：
+			// deployer 的 "panels" 就因为漏登记 AllSlots 而长期不显示、且无人察觉。
+			if !ui.IsKnownSlot(slot) {
+				unknown = append(unknown, slot)
+			}
 			for _, x := range toAnyList(arr) {
 				if m := toAnyMap(x); m != nil {
 					slots[slot] = append(slots[slot], buildComponent(m))
 				}
 			}
+		}
+		if len(unknown) > 0 && d.Log != nil {
+			sort.Strings(unknown)
+			d.Log("warn", "ui.declare from "+c.Caller.Plugin+
+				" uses slots the shell does not render (they will never appear): "+
+				strings.Join(unknown, ", "), nil)
 		}
 		var nav []ui.NavItem
 		if arr, ok := c.Args["nav"].([]any); ok {

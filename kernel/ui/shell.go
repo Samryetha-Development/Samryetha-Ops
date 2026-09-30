@@ -20,9 +20,15 @@ import (
 type Slot string
 
 const (
-	SlotOverviewCards   Slot = "overview.cards"
-	SlotTabs            Slot = "tabs"
-	SlotActions         Slot = "actions"
+	SlotOverviewCards Slot = "overview.cards"
+	SlotTabs          Slot = "tabs"
+	SlotActions       Slot = "actions"
+	// SlotPanels 承载"运维面板"（进程/磁盘/提交/备份/审计/配置提醒…）。
+	//
+	// 它曾经是个**幽灵插槽**：theme.go 会渲染 "panels"，deployer 也一直声明它，
+	// 但它不在 AllSlots 里——而 Render 只回填 AllSlots 中的插槽，于是声明全部落空，
+	// 页面上永远看不到这些面板，且没有任何报错。见 IsKnownSlot 与 ui.declare 的告警。
+	SlotPanels          Slot = "panels"
 	SlotSettingsSection Slot = "settings.sections"
 	SlotLogSources      Slot = "logs.sources"
 	SlotCommands        Slot = "commands"
@@ -34,8 +40,21 @@ const (
 
 // AllSlots 是外壳支持的插槽全集。顺序决定页面上的渲染顺序。
 var AllSlots = []Slot{
-	SlotOverviewCards, SlotTabs, SlotActions, SlotSettingsSection,
+	SlotOverviewCards, SlotTabs, SlotActions, SlotPanels, SlotSettingsSection,
 	SlotLogSources, SlotCommands, SlotHotkeys, SlotToasts, SlotModals, SlotFooter,
+}
+
+// IsKnownSlot 报告外壳是否认识该插槽。
+//
+// 声明外壳不认识的插槽不会有任何效果。必须能显式回答这个问题，
+// 否则"声明成功但永不渲染"就无法在提交前被发现（这正是 SlotPanels 踩过的坑）。
+func IsKnownSlot(name string) bool {
+	for _, s := range AllSlots {
+		if string(s) == name {
+			return true
+		}
+	}
+	return false
 }
 
 // Component 是插件能声明的**受限组件**。

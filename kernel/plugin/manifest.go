@@ -9,6 +9,7 @@ import (
 	"sort"
 
 	"samryetha/kernel/syscall"
+	"samryetha/kernel/ui"
 )
 
 // Kind 插件种类。
@@ -30,27 +31,35 @@ const (
 )
 
 // Slot 前端插槽（外壳预定义，插件只能往这些位置声明）。
-type Slot string
+//
+// 这里**别名**到 ui 包，而不是复制一份常量表。
+// 曾经两份清单各自演化：ui 增加了 "panels" 而这里没有，于是"插槽是否存在"
+// 取决于你看的是哪一份——正是这类漂移让插槽静默失效。别名让它们不可能不一致。
+type Slot = ui.Slot
 
 const (
-	SlotOverviewCards   Slot = "overview.cards"
-	SlotTabs            Slot = "tabs"
-	SlotActions         Slot = "actions"
-	SlotSettingsSection Slot = "settings.sections"
-	SlotLogSources      Slot = "logs.sources"
-	SlotCommands        Slot = "commands"
-	SlotHotkeys         Slot = "hotkeys"
-	SlotToasts          Slot = "toasts"
-	SlotModals          Slot = "modals"
-	SlotFooter          Slot = "footer"
+	SlotOverviewCards   = ui.SlotOverviewCards
+	SlotTabs            = ui.SlotTabs
+	SlotActions         = ui.SlotActions
+	SlotPanels          = ui.SlotPanels
+	SlotSettingsSection = ui.SlotSettingsSection
+	SlotLogSources      = ui.SlotLogSources
+	SlotCommands        = ui.SlotCommands
+	SlotHotkeys         = ui.SlotHotkeys
+	SlotToasts          = ui.SlotToasts
+	SlotModals          = ui.SlotModals
+	SlotFooter          = ui.SlotFooter
 )
 
-// KnownSlots 是外壳支持的插槽全集。声明未知插槽 = 加载失败（防插件与外壳版本错配）。
-var KnownSlots = map[Slot]bool{
-	SlotOverviewCards: true, SlotTabs: true, SlotActions: true,
-	SlotSettingsSection: true, SlotLogSources: true, SlotCommands: true,
-	SlotHotkeys: true, SlotToasts: true, SlotModals: true, SlotFooter: true,
-}
+// KnownSlots 是外壳支持的插槽全集，直接由 ui.AllSlots 派生（单一事实来源）。
+// 声明未知插槽 = 加载失败（防插件与外壳版本错配）。
+var KnownSlots = func() map[Slot]bool {
+	m := make(map[Slot]bool, len(ui.AllSlots))
+	for _, s := range ui.AllSlots {
+		m[s] = true
+	}
+	return m
+}()
 
 // NavItem 导航项。
 type NavItem struct {
