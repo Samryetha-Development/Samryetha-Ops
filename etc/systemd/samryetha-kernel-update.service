@@ -1,0 +1,17 @@
+[Unit]
+Description=Samryetha kernel self-update (download Release, verify, preflight, replace, restart)
+Documentation=https://github.com/Samryetha-Development/Samryetha-Ops
+# 网络必须就绪：本单元要从 GitHub Release 下载内核二进制
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# 以 ubuntu 运行：与 /opt/Samryetha 下文件的属主一致（日志、回滚点、标记）。
+# 需要重启系统服务，因此脚本内部用 `sudo -n systemctl restart`（ubuntu 已配置免密）。
+User=ubuntu
+Group=ubuntu
+Environment=PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+ExecStart=/opt/Samryetha/kernel/scripts/kernel_self_update.sh
+# 预检（在新二进制上起一次健康检查）最长可能 10s，加上下载与重启留足余量
+TimeoutStartSec=600

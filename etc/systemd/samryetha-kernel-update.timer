@@ -1,0 +1,17 @@
+[Unit]
+Description=Periodically check GitHub Releases for a new Samryetha kernel
+Documentation=https://github.com/Samryetha-Development/Samryetha-Ops
+
+[Timer]
+# 每 15 分钟检查一次。
+# 为什么不用 5 分钟：每次检查都会调 GitHub API（未鉴权每小时 60 次/IP），
+# 而内核发布远比主站更新稀少。15 分钟足够及时，也不会把 API 配额耗在空转上。
+OnCalendar=*:0/15
+# 机器关机/休眠错过的检查，开机后补跑一次
+Persistent=true
+# 抖动，避免所有机器同一秒一起打 API
+RandomizedDelaySec=60
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target
