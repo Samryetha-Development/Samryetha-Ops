@@ -21,16 +21,16 @@ project:
     # 凭证不入库：由 config 层从 secrets 注入（见 secrets: 段）
     credentials: secrets/git
 
-# 认证：默认 provider 是 oidc（我们的 Lako）。
-# 立场：以不可变 sub 授权，而非邮箱（邮箱可变、可被抢注）。
-auth:
-  provider: oidc
-  issuer: https://auth.samryetha.com
-  client_id: samryetha-status
-  redirect_uri: https://status.samryetha.com/update/callback
-  roles:
-    # sub（Lako 用户 UUID）→ 角色
-    "a14dc53e-c7f3-48f0-94d5-4f3cf058ae78": admin
+# 认证配置**不在这里**——见 etc/auth.json（内核的认证驱动配置）。
+#
+# 为什么拆出去：这里是"部署描述"，而认证涉及会话密钥等机密，两者的
+# 读取方与生命周期都不同。此前把 auth 段写在这里，却没有任何代码读它，
+# 于是造成"看起来配置了 oidc、实际内核根本不认识"的假象（迁移期真实踩到）。
+# 现在由 kernel/auth 在启动时读取 auth.json 并严格校验：
+#   - oidc 模式必须有 issuer / client_id / redirect_uri 且 session_secret ≥ 32 字符
+#   - header/proxy 模式只在 loopback 监听下才允许启动
+# 配置不合法时内核**拒绝启动**，而不是带着危险默认值运行。
+# 见 etc/auth.example.json。
 
 # 启用的插件。UI 与 API 只呈现这里列出的能力——这就是"可插拔"的落点。
 plugins:

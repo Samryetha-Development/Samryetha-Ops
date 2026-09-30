@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"samryetha/kernel/auth"
 	"samryetha/kernel/boot"
 	"samryetha/kernel/events"
 	"samryetha/kernel/perm"
@@ -96,7 +97,29 @@ func main() {
 	klog := newKernelLog(4000)
 	bus := events.New(4096, nil)
 	policy := loadPolicy(*root)
-	authMode := loadAuthMode(*root)
+
+	// 认证：把配置解析成驱动。配置错误直接拒绝启动——
+	// 曾因 auth 配置被忽略（mode=header 却暴露公网）导致任何人都能自称管理员。
+	authCfg, err := auth.Load(*root)
+	if err != nil {
+		log.Fatalf("auth config: %v", err)
+	}
+	// admin_subs 是便捷项：policy 里已有的映射优先（单一事实来源仍是 policy.txt）
+	for _, sub := range authCfg.AdminSubs {
+		if s := strings.TrimSpace(sub); s != "" {
+			if _, ok := policy.Assign[s]; !ok {
+				policy.Assign[s] = perm.RoleAdmin
+			}
+		}
+	}
+	authDriver, err := auth.New(authCfg, *addr, func(f string, a ...any) {
+		klog.add("info", fmt.Sprintf(f, a...), nil)
+	})
+	if err != nil {
+		log.Fatalf("auth: %v", err)
+	}
+	log.Printf("auth mode: %s", authCfg.Mode)
+
 	procs := proc.NewManager(func(pid int, stream, line string) {
 		klog.add("debug", line, map[string]any{"pid": pid, "stream": stream})
 	})
@@ -162,8 +185,16 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
+	// 认证驱动的自有端点（登录/回调/登出）先注册：
+	// 它们的具体路径必须能盖过 /update/ 这类前缀处理器。
+	authDriver.Mount(mux)
 	registerKernelAPI(mux, klog, bus, table, shell, wire, procs, tasks, policy, outcome, services)
-	registerSyscallEntry(mux, table, authMode)
+	registerSyscallEntry(mux, table)
+
+	// 认证闸门：除公开路径外，一切请求都必须先解析出主体。
+	// 公开路径 = /healthz（探活）+ 驱动自有端点（登录/回调/登出）。
+	publicPaths := append([]string{"/healthz"}, authDriver.PublicPaths()...)
+	gate := func(h http.Handler) http.Handler { return auth.Gate(authDriver, publicPaths, h) }
 
 	if !outcome.Ready {
 		log.Printf("KERNEL IN RESCUE MODE: %s", outcome.Reason)
@@ -171,7 +202,7 @@ func main() {
 		log.Printf("kernel ready (syscall %s, %d calls, %d services)", syscall.Version, len(table), len(services))
 	}
 	log.Printf("listening on %s", *addr)
-	if err := http.ListenAndServe(*addr, wire.serveRouted(mux)); err != nil {
+	if err := http.ListenAndServe(*addr, wire.serveRouted(mux, gate)); err != nil {
 		log.Fatalf("listen: %v", err)
 	}
 }
@@ -391,7 +422,7 @@ func registerKernelAPI(mux *http.ServeMux, klog *kernelLog, bus *events.Bus, tab
 	_ = policy
 }
 
-func registerSyscallEntry(mux *http.ServeMux, table syscall.Table, authMode string) {
+func registerSyscallEntry(mux *http.ServeMux, table syscall.Table) {
 	mux.HandleFunc("/api/kernel/call", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeJSON(w, 405, map[string]any{"error": "POST required"})
@@ -412,8 +443,10 @@ func registerSyscallEntry(mux *http.ServeMux, table syscall.Table, authMode stri
 			return
 		}
 		caller := syscall.CallerInfo{
-			Plugin:  strings.TrimSpace(firstNonEmpty(req.Plugin, r.Header.Get("X-Kernel-Plugin"), "external")),
-			Subject: trustedSubject(r, authMode),
+			Plugin: strings.TrimSpace(firstNonEmpty(req.Plugin, r.Header.Get("X-Kernel-Plugin"), "external")),
+			// 主体只能来自认证闸门写入的上下文——**绝不**采信请求头或请求体，
+			// 否则任何人都能自带一个 sub 自称管理员（这正是本层的意义）。
+			Subject: auth.SubjectFrom(r.Context()),
 			Roles:   nil,
 		}
 		data, cerr := h(r.Context(), syscall.Call{Name: req.Name, Args: req.Args, Caller: caller})
@@ -463,38 +496,6 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
-}
-
-// trustedSubject 解析调用方身份。角色永远不来自请求，只由策略按 subject 决定。
-func trustedSubject(r *http.Request, mode string) string {
-	switch mode {
-	case "header":
-		return strings.TrimSpace(r.Header.Get("X-Kernel-Subject"))
-	case "proxy":
-		return strings.TrimSpace(r.Header.Get("X-Kernel-Authenticated-Subject"))
-	default:
-		return ""
-	}
-}
-
-func loadAuthMode(root string) string {
-	b, err := os.ReadFile(filepath.Join(root, "etc", "auth.txt"))
-	if err != nil {
-		return "none"
-	}
-	for _, line := range strings.Split(string(b), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if strings.HasPrefix(line, "mode") {
-			parts := strings.SplitN(line, "=", 2)
-			if len(parts) == 2 {
-				return strings.TrimSpace(parts[1])
-			}
-		}
-	}
-	return "none"
 }
 
 func loadPolicy(root string) *perm.Policy {

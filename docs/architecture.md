@@ -98,7 +98,7 @@
 **权限**
 | 调用 | 参数 | 返回 | perm |
 |---|---|---|---|
-| `auth.subject` | — | `{id,roles,claims}` | — |
+| `auth.public` | — | `{subject,role,caps,plugin}` | — |
 | `auth.check` | `capability` | `{allowed}` | — |
 
 **进程（内核原语，语义中立）**
@@ -203,14 +203,29 @@ config:                               # 我的配置 schema（内核负责校验
 
 ## 7. 认证与权限（有立场的默认值）
 
-内核的 `auth.*`/能力判定是**机制**；身份来源是**驱动**。
+内核的 `auth.*`/能力判定是**机制**；身份来源是**驱动**（`kernel/auth`）。
 
-- 驱动可插拔：`oidc`（默认）· `basic` · `token` · `none`。
-- **默认立场：OIDC + 以不可变 `sub` 授权。** 邮箱可变、可被抢注，因此默认
+认证与授权严格分层：
+- **认证**（`kernel/auth`）只回答"你是谁"，产出 `subject`。
+- **授权**（`kernel/perm`）只回答"你能做什么"，且角色**只由策略按 subject 决定**，
+  绝不采信请求头或调用方自述。
+
+驱动可插拔：`none` · `header` · `proxy` · `oidc`（见 `etc/auth.json`）。
+
+- **立场：OIDC + 以不可变 `sub` 授权。** 邮箱可变、可被抢注，因此默认
   **不**用邮箱做授权标识；若必须用邮箱，则要求 `email_verified=true`。
-  这条会写进文档，作为给使用者的建议——**通用不等于没有主见**。
-- 权限模型：`身份 → 角色 → 能力点`。内建角色 `viewer` / `operator` / `admin`，
-  能力点按 `域.动作`（如 `deploy.trigger`、`proc.manage`）。插件在 manifest 里声明所需能力点。
+- `oidc` 走授权码 + PKCE(S256) + `userinfo` 取主体；会话用 HMAC-SHA256
+  签名 Cookie（零第三方依赖，见 `kernel/auth/session.go`）。
+- **`header`/`proxy` 只信任请求头注入的身份**，因此仅当监听地址是 loopback
+  时才允许启动（`Config.Validate` 强制）。这是对一次真实事故的补救：
+  迁移期内核退化成 `header` 模式却被 Caddy 暴露到公网，任何人自带一个
+  `X-Kernel-Subject` 头就能自称 `admin`。**任何基于请求头的身份来源，其
+  安全前提都是"内核不可被公网直连"。**
+- 认证闸门（`auth.Gate`）作用于**整条分发链**：内核 API 与服务自挂路由
+  （除显式 `public` 外）都必须先解析出主体。
+
+权限模型：`身份 → 角色 → 能力点`。内建角色 `viewer` / `operator` / `admin`，
+能力点按 `域.动作`（如 `deploy.trigger`、`proc.manage`）。插件在 manifest 里声明所需能力点。
 
 ## 8. 启动、救援模式与 OTA
 

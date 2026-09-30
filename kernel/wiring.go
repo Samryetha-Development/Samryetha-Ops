@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"samryetha/kernel/actions"
@@ -111,24 +112,31 @@ func buildWiring(root string) (*wiring, error) {
 //
 // 顺序很重要：服务可以覆盖同名的内核端点（例如自定义 /healthz），
 // 但内核 API 前缀 /api/kernel/ 与 /_kernel/ 保留，不允许被覆盖。
-func (w *wiring) serveRouted(fallback http.Handler) http.Handler {
+// serveRouted 是内核分发的入口：先查服务挂载的路由，未命中再走内核自带端点。
+//
+// 顺序很重要：服务可以覆盖同名的内核端点（例如自定义 /healthz），
+// 但内核 API 前缀 /api/kernel/ 与 /_kernel/ 保留，不允许被覆盖。
+//
+// gate 是认证闸门。它作用于**整条分发链**而不只是 mux：
+// 服务能自己挂路由，若只在内核 mux 上鉴权，服务路由就成了绕过认证的后门。
+// 只有显式声明 Public 的路由（如 /status.json）才豁免。
+func (w *wiring) serveRouted(fallback http.Handler, gate func(http.Handler) http.Handler) http.Handler {
+	gatedFallback := gate(fallback)
 	return http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		// 保留命名空间：内核自用，服务不得占用
-		if len(r.URL.Path) >= 12 && r.URL.Path[:12] == "/api/kernel/" {
-			fallback.ServeHTTP(rw, r)
-			return
-		}
-		if len(r.URL.Path) >= 9 && r.URL.Path[:9] == "/_kernel/" {
-			fallback.ServeHTTP(rw, r)
+		if strings.HasPrefix(r.URL.Path, "/api/kernel/") || strings.HasPrefix(r.URL.Path, "/_kernel/") {
+			gatedFallback.ServeHTTP(rw, r)
 			return
 		}
 		if fn, m, ok := w.Routes.Lookup(r.Method, r.URL.Path); ok {
-			// 公开路由免认证；其余交由处理器自行校验（处理器拿得到内核身份）
-			_ = m
-			fn(rw, r)
+			if m.Public {
+				fn(rw, r)
+				return
+			}
+			gate(http.HandlerFunc(fn)).ServeHTTP(rw, r)
 			return
 		}
-		fallback.ServeHTTP(rw, r)
+		gatedFallback.ServeHTTP(rw, r)
 	})
 }
 

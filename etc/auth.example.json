@@ -1,0 +1,25 @@
+{
+  "//": "内核认证配置示例。真实文件是 etc/auth.json（不要提交密钥）。",
+  "//1": "mode: none | header | proxy | oidc",
+  "//2": "header/proxy 只信任请求头，因此仅当监听地址是 loopback 时内核才允许启动。",
+  "//3": "oidc 用授权码 + PKCE（S256）；公共客户端不需要 client_secret。",
+
+  "mode": "oidc",
+
+  "issuer": "https://auth.samryetha.com",
+  "client_id": "samryetha-status",
+  "redirect_uri": "https://status.samryetha.com/update/callback",
+  "scopes": ["openid", "email", "profile"],
+
+  "//4": "allowed_subs 非空时，只有列出的 sub 能登录（粗粒度闸门）。",
+  "//5": "admin_subs 是便捷项：映射为 admin；policy.txt 里已有的映射优先。",
+  "//6": "admin_emails 是可选的邮箱回退，仅在 email_verified=true 时生效（默认不用）。",
+  "allowed_subs": ["a14dc53e-c7f3-48f0-94d5-4f3cf058ae78"],
+  "admin_subs": ["a14dc53e-c7f3-48f0-94d5-4f3cf058ae78"],
+  "admin_emails": [],
+
+  "//7": "session_secret 至少 32 字符；可用 openssl rand -base64 48 生成。",
+  "session_secret": "REPLACE_WITH_openssl_rand_base64_48",
+  "cookie_name": "samryetha_kernel_session",
+  "session_ttl_hours": 12
+}
