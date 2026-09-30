@@ -104,11 +104,19 @@ func main() {
 	if err != nil {
 		log.Fatalf("auth config: %v", err)
 	}
-	// admin_subs 是便捷项：policy 里已有的映射优先（单一事实来源仍是 policy.txt）
+	// admin_subs / admin_groups 是便捷项：policy 里已有的映射优先
+	// （单一事实来源仍是 policy.txt）。
 	for _, sub := range authCfg.AdminSubs {
 		if s := strings.TrimSpace(sub); s != "" {
 			if _, ok := policy.Assign[s]; !ok {
 				policy.Assign[s] = perm.RoleAdmin
+			}
+		}
+	}
+	for _, g := range authCfg.AdminGroups {
+		if s := strings.TrimSpace(g); s != "" {
+			if _, ok := policy.AssignGroups[s]; !ok {
+				policy.AssignGroups[s] = perm.RoleAdmin
 			}
 		}
 	}
@@ -442,11 +450,13 @@ func registerSyscallEntry(mux *http.ServeMux, table syscall.Table) {
 			writeJSON(w, 404, map[string]any{"ok": false, "error": map[string]any{"code": "unknown_call", "message": req.Name}})
 			return
 		}
+		id := auth.IdentityFrom(r.Context())
 		caller := syscall.CallerInfo{
 			Plugin: strings.TrimSpace(firstNonEmpty(req.Plugin, r.Header.Get("X-Kernel-Plugin"), "external")),
-			// 主体只能来自认证闸门写入的上下文——**绝不**采信请求头或请求体，
-			// 否则任何人都能自带一个 sub 自称管理员（这正是本层的意义）。
-			Subject: auth.SubjectFrom(r.Context()),
+			// 主体与组只能来自认证闸门写入的上下文——**绝不**采信请求头或请求体，
+			// 否则任何人都能自带一个 sub/组自称管理员（这正是本层的意义）。
+			Subject: id.Subject,
+			Groups:  id.Groups,
 			Roles:   nil,
 		}
 		data, cerr := h(r.Context(), syscall.Call{Name: req.Name, Args: req.Args, Caller: caller})

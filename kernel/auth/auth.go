@@ -14,8 +14,7 @@ type Driver interface {
 	// Mode 返回驱动种类。
 	Mode() Mode
 	// Identify 返回请求的主体；ok=false 表示未认证（不写响应）。
-	// 已认证但无权限的用户可返回 (sub, true)，由策略决定其角色。
-	Identify(r *http.Request) (subject string, ok bool)
+	Identify(r *http.Request) (Identity, bool)
 	// Challenge 处理未认证请求：API 返回 401，浏览器重定向到登录页。
 	Challenge(w http.ResponseWriter, r *http.Request)
 	// Mount 注册驱动自身的端点（登录/回调/登出）。非 OIDC 驱动为空实现。
@@ -28,16 +27,19 @@ type Driver interface {
 
 type ctxKey struct{}
 
-// WithSubject 把主体写入上下文（供 syscall 入口读取）。
-func WithSubject(ctx context.Context, sub string) context.Context {
-	return context.WithValue(ctx, ctxKey{}, sub)
+// WithIdentity 把主体写入上下文（供 syscall 入口读取）。
+func WithIdentity(ctx context.Context, id Identity) context.Context {
+	return context.WithValue(ctx, ctxKey{}, id)
 }
 
-// SubjectFrom 从上下文取主体；不存在时返回空串（= 匿名）。
-func SubjectFrom(ctx context.Context) string {
-	v, _ := ctx.Value(ctxKey{}).(string)
+// IdentityFrom 从上下文取主体；不存在时返回零值（= 匿名）。
+func IdentityFrom(ctx context.Context) Identity {
+	v, _ := ctx.Value(ctxKey{}).(Identity)
 	return v
 }
+
+// SubjectFrom 是 IdentityFrom 的便捷写法。
+func SubjectFrom(ctx context.Context) string { return IdentityFrom(ctx).Subject }
 
 // New 按配置构造驱动。出错时调用方应拒绝启动（配置错误不该被容忍）。
 func New(cfg *Config, listen string, logf func(format string, args ...any)) (Driver, error) {
@@ -74,8 +76,8 @@ func Gate(d Driver, publicPaths []string, next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		if sub, ok := d.Identify(r); ok {
-			next.ServeHTTP(w, r.WithContext(WithSubject(r.Context(), sub)))
+		if id, ok := d.Identify(r); ok {
+			next.ServeHTTP(w, r.WithContext(WithIdentity(r.Context(), id)))
 			return
 		}
 		d.Challenge(w, r)
@@ -87,10 +89,10 @@ func Gate(d Driver, publicPaths []string, next http.Handler) http.Handler {
 type noneDriver struct{}
 
 func (noneDriver) Mode() Mode { return ModeNone }
-func (noneDriver) Identify(*http.Request) (string, bool) {
-	// 匿名主体（空串）仍然"已认证"，交由策略给出默认角色（通常 viewer）。
+func (noneDriver) Identify(*http.Request) (Identity, bool) {
+	// 匿名主体（空 sub）仍然"已认证"，交由策略给出默认角色（通常 viewer）。
 	// 这不是放行特权：没有策略映射就永远是 viewer。
-	return "", true
+	return Identity{}, true
 }
 func (noneDriver) Challenge(w http.ResponseWriter, r *http.Request) { deny(w, r) }
 func (noneDriver) Mount(*http.ServeMux)                             {}
@@ -107,9 +109,9 @@ type headerDriver struct {
 }
 
 func (d *headerDriver) Mode() Mode { return d.mode }
-func (d *headerDriver) Identify(r *http.Request) (string, bool) {
+func (d *headerDriver) Identify(r *http.Request) (Identity, bool) {
 	v := strings.TrimSpace(r.Header.Get(d.header))
-	return v, v != ""
+	return Identity{Subject: v}, v != ""
 }
 func (d *headerDriver) Challenge(w http.ResponseWriter, r *http.Request) { deny(w, r) }
 func (d *headerDriver) Mount(*http.ServeMux)                             {}
@@ -139,30 +141,38 @@ type oidcDriver struct {
 	signer *signer
 	logf   func(format string, args ...any)
 
-	secure      bool
-	allowedSubs map[string]bool
-	callback    string
-	login       string
-	logout      string
+	secure        bool
+	allowedSubs   map[string]bool
+	allowedGroups map[string]bool
+	callback      string
+	login         string
+	logout        string
 }
 
 func newOIDCDriver(cfg *Config, logf func(string, ...any)) *oidcDriver {
-	allowed := map[string]bool{}
+	allowedSubs := map[string]bool{}
 	for _, s := range cfg.AllowedSubs {
 		if s = strings.TrimSpace(s); s != "" {
-			allowed[s] = true
+			allowedSubs[s] = true
+		}
+	}
+	allowedGroups := map[string]bool{}
+	for _, g := range cfg.AllowedGroups {
+		if g = strings.TrimSpace(g); g != "" {
+			allowedGroups[g] = true
 		}
 	}
 	return &oidcDriver{
-		cfg:         cfg,
-		client:      newOIDCClient(cfg),
-		signer:      newSigner(cfg.SessionSecret, cfg.ttl()),
-		logf:        logf,
-		secure:      cfg.UsesHTTPS(),
-		allowedSubs: allowed,
-		callback:    cfg.callbackPath(),
-		login:       cfg.loginPath(),
-		logout:      cfg.logoutPath(),
+		cfg:           cfg,
+		client:        newOIDCClient(cfg),
+		signer:        newSigner(cfg.SessionSecret, cfg.ttl()),
+		logf:          logf,
+		secure:        cfg.UsesHTTPS(),
+		allowedSubs:   allowedSubs,
+		allowedGroups: allowedGroups,
+		callback:      cfg.callbackPath(),
+		login:         cfg.loginPath(),
+		logout:        cfg.logoutPath(),
 	}
 }
 
@@ -172,19 +182,38 @@ func (d *oidcDriver) PublicPaths() []string {
 	return []string{d.login, d.callback, d.logout}
 }
 
-func (d *oidcDriver) Identify(r *http.Request) (string, bool) {
+func (d *oidcDriver) Identify(r *http.Request) (Identity, bool) {
 	c, err := r.Cookie(d.cfg.cookieName())
 	if err != nil {
-		return "", false
+		return Identity{}, false
 	}
-	sub, ok := d.signer.verify(c.Value)
+	id, ok := d.signer.verify(c.Value)
 	if !ok {
-		return "", false
+		return Identity{}, false
 	}
-	if len(d.allowedSubs) > 0 && !d.allowedSubs[sub] {
-		return "", false
+	if !d.allowed(id) {
+		return Identity{}, false
 	}
-	return sub, true
+	return id, true
+}
+
+// allowed 是准入闸门：配置了 allowed_subs / allowed_groups 时，必须命中其一。
+//
+// 两者都没配 = 任何通过 IdP 认证的用户都可进入（角色仍由策略决定，
+// 默认 viewer）。给管理控制台建议至少配一个 allowed_groups。
+func (d *oidcDriver) allowed(id Identity) bool {
+	if len(d.allowedSubs) == 0 && len(d.allowedGroups) == 0 {
+		return true
+	}
+	if d.allowedSubs[id.Subject] {
+		return true
+	}
+	for _, g := range id.Groups {
+		if d.allowedGroups[g] {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *oidcDriver) Challenge(w http.ResponseWriter, r *http.Request) {
@@ -269,13 +298,14 @@ func (d *oidcDriver) handleCallback(w http.ResponseWriter, r *http.Request) {
 		d.fail(w, http.StatusBadGateway, "could not read user info")
 		return
 	}
-	if len(d.allowedSubs) > 0 && !d.allowedSubs[info.Sub] {
-		d.logf("auth: subject %s is not in allowed_subs", info.Sub)
+	id := Identity{Subject: info.Sub, Groups: info.Groups}
+	if !d.allowed(id) {
+		d.logf("auth: subject %s (groups %v) is not allowed", id.Subject, id.Groups)
 		d.fail(w, http.StatusForbidden, "this account is not allowed to access the console")
 		return
 	}
 
-	d.setCookie(w, d.cfg.cookieName(), d.signer.sign(info.Sub), int(d.cfg.ttl().Seconds()))
+	d.setCookie(w, d.cfg.cookieName(), d.signer.sign(id), int(d.cfg.ttl().Seconds()))
 	d.clearCookie(w, cookieState)
 	d.clearCookie(w, cookieVerifier)
 
@@ -284,7 +314,7 @@ func (d *oidcDriver) handleCallback(w http.ResponseWriter, r *http.Request) {
 		next = safeNext(nc.Value)
 	}
 	d.clearCookie(w, cookieNext)
-	d.logf("auth: login ok for subject %s", info.Sub)
+	d.logf("auth: login ok for subject %s (groups %v)", id.Subject, id.Groups)
 	http.Redirect(w, r, next, http.StatusFound)
 }
 

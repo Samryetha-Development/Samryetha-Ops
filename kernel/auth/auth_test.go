@@ -2,6 +2,7 @@ package auth
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -59,18 +60,33 @@ func TestUnknownModeRejected(t *testing.T) {
 	}
 }
 
+// 默认 scope 必须包含 groups，否则组授权会静默失效。
+func TestDefaultScopesIncludeGroups(t *testing.T) {
+	c := &Config{}
+	found := false
+	for _, s := range c.scopes() {
+		if s == "groups" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("默认 scope 必须包含 groups，实际 %v", c.scopes())
+	}
+}
+
 // --- 会话签名 ---
 
 func TestSignerRoundTripAndTamper(t *testing.T) {
 	s := newSigner(strings.Repeat("k", 32), time.Hour)
-	v := s.sign("sub-1")
-	if sub, ok := s.verify(v); !ok || sub != "sub-1" {
-		t.Fatalf("签名校验失败：sub=%q ok=%v", sub, ok)
+	v := s.sign(Identity{Subject: "sub-1", Groups: []string{"samryetha-admins", "samryetha-users"}})
+
+	id, ok := s.verify(v)
+	if !ok || id.Subject != "sub-1" || len(id.Groups) != 2 || id.Groups[0] != "samryetha-admins" {
+		t.Fatalf("签名校验失败：%+v ok=%v", id, ok)
 	}
-	// 篡改签名：改动 MAC 的最后一个字符（会话串是 base64url，不含明文的 sub）
-	last := v[len(v)-1]
+	// 篡改签名：改动最后一个字符（会话串是 base64url，不含明文 sub）
 	flip := byte('A')
-	if last == 'A' {
+	if v[len(v)-1] == 'A' {
 		flip = 'B'
 	}
 	if _, ok := s.verify(v[:len(v)-1] + string(flip)); ok {
@@ -82,7 +98,7 @@ func TestSignerRoundTripAndTamper(t *testing.T) {
 	}
 	// 过期
 	expired := newSigner(strings.Repeat("k", 32), -time.Minute)
-	if _, ok := s.verify(expired.sign("sub-1")); ok {
+	if _, ok := s.verify(expired.sign(Identity{Subject: "sub-1"})); ok {
 		t.Fatal("过期会话必须被拒绝")
 	}
 }
@@ -119,9 +135,9 @@ func TestNoneDriverPassesEveryoneAsAnonymous(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sub, ok := d.Identify(httptest.NewRequest("GET", "/x", nil))
-	if !ok || sub != "" {
-		t.Fatalf("none 模式应给出匿名主体：sub=%q ok=%v", sub, ok)
+	id, ok := d.Identify(httptest.NewRequest("GET", "/x", nil))
+	if !ok || id.Subject != "" {
+		t.Fatalf("none 模式应给出匿名主体：%+v ok=%v", id, ok)
 	}
 }
 
@@ -163,15 +179,15 @@ func TestGateChallengesAnonymous(t *testing.T) {
 type fakeIdP struct {
 	*httptest.Server
 	challengeByCode map[string]string
-	lastVerifier    string
 	userinfoSub     string
+	userinfoGroups  []string
 }
 
 func newFakeIdP(t *testing.T) *fakeIdP {
 	t.Helper()
 	f := &fakeIdP{challengeByCode: map[string]string{}, userinfoSub: "sub-123"}
 	mux := http.NewServeMux()
-	base := "" // 在 server 启动后回填
+	base := "" // server 启动后回填
 	mux.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"issuer":                 base,
@@ -187,10 +203,8 @@ func newFakeIdP(t *testing.T) *fakeIdP {
 			return
 		}
 		code := r.Form.Get("code")
-		verifier := r.Form.Get("code_verifier")
-		f.lastVerifier = verifier
 		want, ok := f.challengeByCode[code]
-		if !ok || want != pkceS256(verifier) {
+		if !ok || want != pkceS256(r.Form.Get("code_verifier")) {
 			http.Error(w, "pkce mismatch", 400)
 			return
 		}
@@ -203,6 +217,7 @@ func newFakeIdP(t *testing.T) *fakeIdP {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"sub": f.userinfoSub, "email": "tyc@example.com", "email_verified": true,
+			"groups": f.userinfoGroups,
 		})
 	})
 	srv := httptest.NewServer(mux)
@@ -222,60 +237,29 @@ func noRedirectClient() *http.Client {
 	}
 }
 
-func TestOIDCLoginFlowEndToEnd(t *testing.T) {
-	idp := newFakeIdP(t)
-	cfg := &Config{
-		Mode:          ModeOIDC,
-		Issuer:        idp.URL,
-		ClientID:      "samryetha-status",
-		RedirectURI:   "http://127.0.0.1/update/callback",
-		SessionSecret: strings.Repeat("s", 40),
-		AllowedSubs:   []string{"sub-123"},
-	}
+// 走完整登录流程并返回已建立会话的客户端 + 服务端地址。
+func loginAs(t *testing.T, idp *fakeIdP, cfg *Config, groups []string) (*http.Client, string) {
+	t.Helper()
+	idp.userinfoGroups = groups
 	d, err := New(cfg, "127.0.0.1:3040", t.Logf)
 	if err != nil {
 		t.Fatalf("构造驱动：%v", err)
 	}
-
 	mux := http.NewServeMux()
 	d.Mount(mux)
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })
 	mux.HandleFunc("/api/kernel/meta", func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte("subject=" + SubjectFrom(r.Context())))
+		id := IdentityFrom(r.Context())
+		_, _ = fmt.Fprintf(w, "subject=%s groups=%v", id.Subject, id.Groups)
 	})
 	publicPaths := append([]string{"/healthz"}, d.PublicPaths()...)
 	srv := httptest.NewServer(Gate(d, publicPaths, mux))
 	t.Cleanup(srv.Close)
 
 	c := noRedirectClient()
-
-	// 1) 匿名访问受保护 API → 401
-	resp, err := c.Get(srv.URL + "/api/kernel/meta")
+	resp, err := c.Get(srv.URL + "/update/auth/login?next=/api/kernel/meta")
 	if err != nil {
 		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("匿名应 401，实际 %d", resp.StatusCode)
-	}
-	resp.Body.Close()
-
-	// 2) 匿名访问页面路径 → 重定向到登录
-	resp, err = c.Get(srv.URL + "/update")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusFound || !strings.HasPrefix(resp.Header.Get("Location"), "/update/auth/login") {
-		t.Fatalf("匿名页面应重定向到登录，实际 %d %q", resp.StatusCode, resp.Header.Get("Location"))
-	}
-	resp.Body.Close()
-
-	// 3) 登录入口 → 重定向到 IdP 授权端点（带 state 与 PKCE challenge）
-	resp, err = c.Get(srv.URL + "/update/auth/login?next=/api/kernel/meta")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusFound {
-		t.Fatalf("登录入口应 302，实际 %d", resp.StatusCode)
 	}
 	authURL, err := url.Parse(resp.Header.Get("Location"))
 	if err != nil {
@@ -286,17 +270,15 @@ func TestOIDCLoginFlowEndToEnd(t *testing.T) {
 		t.Fatalf("应重定向到 IdP 授权端点，实际 %q", authURL.String())
 	}
 	q := authURL.Query()
-	state := q.Get("state")
-	if state == "" || q.Get("code_challenge_method") != "S256" || q.Get("code_challenge") == "" {
+	if q.Get("state") == "" || q.Get("code_challenge_method") != "S256" || q.Get("code_challenge") == "" {
 		t.Fatalf("授权请求缺少 state/PKCE：%q", authURL.RawQuery)
 	}
 	if q.Get("redirect_uri") != cfg.RedirectURI {
 		t.Fatalf("redirect_uri 必须是已登记的值，实际 %q", q.Get("redirect_uri"))
 	}
-	// 假 IdP 记录该 code 对应的 challenge，换取令牌时会校验 PKCE
 	idp.challengeByCode["code-1"] = q.Get("code_challenge")
 
-	// 4) state 不匹配必须被拒（CSRF 防线）
+	// state 不匹配必须被拒（CSRF 防线）
 	resp, err = c.Get(srv.URL + "/update/callback?code=code-1&state=WRONG")
 	if err != nil {
 		t.Fatal(err)
@@ -306,39 +288,45 @@ func TestOIDCLoginFlowEndToEnd(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	// 5) 正确回调 → 下发会话 Cookie（由于 state Cookie 仍有效，可继续）
-	resp, err = c.Get(srv.URL + "/update/callback?code=code-1&state=" + url.QueryEscape(state))
+	resp, err = c.Get(srv.URL + "/update/callback?code=code-1&state=" + url.QueryEscape(q.Get("state")))
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != "/api/kernel/meta" {
 		t.Fatalf("成功回调应 302 到 next，实际 %d %q", resp.StatusCode, resp.Header.Get("Location"))
 	}
-	var gotSession bool
-	for _, ck := range resp.Cookies() {
-		if ck.Name == cfg.cookieName() && ck.Value != "" {
-			gotSession = true
-		}
-	}
-	resp.Body.Close()
-	if !gotSession {
-		t.Fatal("回调成功后应下发会话 Cookie")
-	}
+	return c, srv.URL
+}
 
-	// 6) 带会话访问受保护 API → 200 且主体正确
-	resp, err = c.Get(srv.URL + "/api/kernel/meta")
+func TestOIDCLoginFlowWithGroups(t *testing.T) {
+	idp := newFakeIdP(t)
+	cfg := &Config{
+		Mode:          ModeOIDC,
+		Issuer:        idp.URL,
+		ClientID:      "samryetha-status",
+		RedirectURI:   "http://127.0.0.1/update/callback",
+		SessionSecret: strings.Repeat("s", 40),
+		// 准入按 Lako 组：这正是"在 IdP 里选用户"的落点
+		AllowedGroups: []string{"samryetha-admins"},
+	}
+	c, base := loginAs(t, idp, cfg, []string{"samryetha-users", "samryetha-admins"})
+
+	// 带会话访问受保护 API → 200，且组被完整带到处理器
+	resp, err := c.Get(base + "/api/kernel/meta")
 	if err != nil {
 		t.Fatal(err)
 	}
 	body := make([]byte, 256)
 	n, _ := resp.Body.Read(body)
 	resp.Body.Close()
-	if resp.StatusCode != 200 || !strings.Contains(string(body[:n]), "subject=sub-123") {
-		t.Fatalf("带会话应可访问，实际 %d %q", resp.StatusCode, string(body[:n]))
+	got := string(body[:n])
+	if resp.StatusCode != 200 || !strings.Contains(got, "subject=sub-123") || !strings.Contains(got, "samryetha-admins") {
+		t.Fatalf("带会话应可访问且带组，实际 %d %q", resp.StatusCode, got)
 	}
 
-	// 7) 会话被篡改 → 重新变回匿名
-	req, _ := http.NewRequest("GET", srv.URL+"/api/kernel/meta", nil)
+	// 伪造会话 → 401
+	req, _ := http.NewRequest("GET", base+"/api/kernel/meta", nil)
 	req.AddCookie(&http.Cookie{Name: cfg.cookieName(), Value: "forged.value"})
 	resp3, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -350,14 +338,14 @@ func TestOIDCLoginFlowEndToEnd(t *testing.T) {
 	resp3.Body.Close()
 }
 
-// allowed_subs 之外的主体即使完成 IdP 登录也必须被拒。
-func TestOIDCRejectsDisallowedSubject(t *testing.T) {
+// 不在 allowed_groups 里的主体即使完成 IdP 登录也必须被拒。
+func TestOIDCRejectsDisallowedGroup(t *testing.T) {
 	idp := newFakeIdP(t)
-	idp.userinfoSub = "intruder"
 	cfg := &Config{
 		Mode: ModeOIDC, Issuer: idp.URL, ClientID: "c",
 		RedirectURI:   "http://127.0.0.1/update/callback",
-		SessionSecret: strings.Repeat("s", 40), AllowedSubs: []string{"sub-123"},
+		SessionSecret: strings.Repeat("s", 40),
+		AllowedGroups: []string{"samryetha-admins"},
 	}
 	d, _ := New(cfg, "127.0.0.1:1", t.Logf)
 	mux := http.NewServeMux()
@@ -375,15 +363,15 @@ func TestOIDCRejectsDisallowedSubject(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	st := authURL.Query().Get("state")
 	idp.challengeByCode["c1"] = authURL.Query().Get("code_challenge")
 
-	resp, err = c.Get(srv.URL + "/update/callback?code=c1&state=" + url.QueryEscape(st))
+	idp.userinfoGroups = []string{"samryetha-users"} // 不在准入组里
+	resp, err = c.Get(srv.URL + "/update/callback?code=c1&state=" + url.QueryEscape(authURL.Query().Get("state")))
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("未授权主体应 403，实际 %d", resp.StatusCode)
+		t.Fatalf("未授权组应 403，实际 %d", resp.StatusCode)
 	}
 }

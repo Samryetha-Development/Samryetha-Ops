@@ -374,7 +374,7 @@ func checkPerm(d Deps, call Call) *CallError {
 	if need == "" {
 		return nil
 	}
-	role := d.Policy.RoleOf(call.Caller.Subject)
+	role := d.Policy.RoleFor(call.Caller.Subject, call.Caller.Groups)
 	if !d.Policy.Allows(role, string(need)) {
 		return &CallError{Code: "denied", Message: fmt.Sprintf("role %s lacks %s", role, need)}
 	}

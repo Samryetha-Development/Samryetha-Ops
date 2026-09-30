@@ -36,9 +36,10 @@ type Call struct {
 
 // CallerInfo 标识调用方，供权限判定与审计使用。
 type CallerInfo struct {
-	Plugin  string   `json:"plugin"`  // 插件 id，如 "deployer"
-	Roles   []string `json:"roles"`   // 主体角色
-	Subject string   `json:"subject"` // 身份标识（如 OIDC sub）
+	Plugin  string   `json:"plugin"`           // 插件 id，如 "deployer"
+	Roles   []string `json:"roles"`            // 主体角色
+	Subject string   `json:"subject"`          // 身份标识（如 OIDC sub）
+	Groups  []string `json:"groups,omitempty"` // 主体所属组（IdP 的 groups claim）
 }
 
 // Handler 实现单个 syscall。内核为每个名字注册一个 Handler。

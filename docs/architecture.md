@@ -216,6 +216,11 @@ config:                               # 我的配置 schema（内核负责校验
   **不**用邮箱做授权标识；若必须用邮箱，则要求 `email_verified=true`。
 - `oidc` 走授权码 + PKCE(S256) + `userinfo` 取主体；会话用 HMAC-SHA256
   签名 Cookie（零第三方依赖，见 `kernel/auth/session.go`）。
+- **按组授权**：主体的 `groups` claim（如 Lako 角色 `samryetha-admins`）可映射
+  到角色（`auth.json` 的 `admin_groups` → `policy.AssignGroups`）。于是"加人"
+  发生在 IdP——给某人一个组即可，不必改内核配置。
+  判定顺序固定：**sub 点名 > 组（取最高） > 默认 viewer**；sub 点名优先，
+  因此可以对个别人显式收紧而不被组配置覆盖。
 - **`header`/`proxy` 只信任请求头注入的身份**，因此仅当监听地址是 loopback
   时才允许启动（`Config.Validate` 强制）。这是对一次真实事故的补救：
   迁移期内核退化成 `header` 模式却被 Caddy 暴露到公网，任何人自带一个

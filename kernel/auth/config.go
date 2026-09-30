@@ -65,11 +65,14 @@ type Config struct {
 	RedirectURI  string   `json:"redirect_uri"`
 	Scopes       []string `json:"scopes,omitempty"`
 
-	// AllowedSubs 若非空，则只有这些 sub 能登录（粗粒度闸门）。
+	// AllowedSubs / AllowedGroups 若非空，则只有命中的主体能登录（粗粒度闸门）。
 	// 授权（角色）仍由 policy 决定；这里只是限制"谁能进门"。
-	AllowedSubs []string `json:"allowed_subs,omitempty"`
-	// AdminSubs 是便捷项：这些 sub 直接映射为 admin（policy 里已有的映射优先）。
-	AdminSubs []string `json:"admin_subs,omitempty"`
+	AllowedSubs   []string `json:"allowed_subs,omitempty"`
+	AllowedGroups []string `json:"allowed_groups,omitempty"`
+	// AdminSubs / AdminGroups 是便捷项：命中者直接映射为 admin。
+	// policy 里已有的映射优先（单一事实来源仍是 policy）。
+	AdminSubs   []string `json:"admin_subs,omitempty"`
+	AdminGroups []string `json:"admin_groups,omitempty"`
 	// AdminEmails 是可选的邮箱回退：仅当 email_verified=true 时才生效。
 	// 默认不用邮箱授权（邮箱可变、可被抢注），因此通常是空的。
 	AdminEmails []string `json:"admin_emails,omitempty"`
@@ -98,7 +101,9 @@ func (c *Config) scopes() []string {
 	if len(c.Scopes) > 0 {
 		return c.Scopes
 	}
-	return []string{"openid", "email", "profile"}
+	// groups 必须默认带上：组授权依赖 IdP 在 userinfo 里返回 groups claim。
+	// 少了它，admin_groups / allowed_groups 会全部失效（表现为"组里的人进不来"）。
+	return []string{"openid", "email", "profile", "groups"}
 }
 
 // loginPath 返回登录入口路径。

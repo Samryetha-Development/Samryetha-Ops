@@ -274,9 +274,9 @@ func registerActions(t Table, d Deps) {
 			return nil, &CallError{Code: "not_found", Message: "unknown action " + name}
 		}
 		// 权限：调用者需要该动作所属服务的能力点（约定为 "action.<服务名>"）
-		if !d.Policy.Allows(d.Policy.RoleOf(c.Caller.Subject), "action."+owner) {
+		if !d.Policy.Allows(d.Policy.RoleFor(c.Caller.Subject, c.Caller.Groups), "action."+owner) {
 			return nil, &CallError{Code: "denied",
-				Message: fmt.Sprintf("role %s lacks action.%s", d.Policy.RoleOf(c.Caller.Subject), owner)}
+				Message: fmt.Sprintf("role %s lacks action.%s", d.Policy.RoleFor(c.Caller.Subject, c.Caller.Groups), owner)}
 		}
 		// 转发给注册该动作的服务；服务侧同步执行（内建）或经其自身机制（外部）
 		result, err := d.Actions.Invoke(ctx, name, c.Args)
@@ -296,7 +296,7 @@ func registerActions(t Table, d Deps) {
 // registerAuth 挂上主体查询。
 func registerAuth(t Table, d Deps) {
 	t["auth.public"] = func(ctx context.Context, c Call) (map[string]any, *CallError) {
-		role := d.Policy.RoleOf(c.Caller.Subject)
+		role := d.Policy.RoleFor(c.Caller.Subject, c.Caller.Groups)
 		return map[string]any{
 			"subject": c.Caller.Subject,
 			"role":    role,
@@ -306,7 +306,7 @@ func registerAuth(t Table, d Deps) {
 	}
 	t["auth.check"] = func(ctx context.Context, c Call) (map[string]any, *CallError) {
 		capability := str(c.Args["capability"], "")
-		role := d.Policy.RoleOf(c.Caller.Subject)
+		role := d.Policy.RoleFor(c.Caller.Subject, c.Caller.Groups)
 		return map[string]any{"allowed": d.Policy.Allows(role, capability), "role": role}, nil
 	}
 }

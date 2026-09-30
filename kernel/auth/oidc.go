@@ -23,10 +23,11 @@ type discovery struct {
 
 // userInfo 是 userinfo 端点返回的声明（取所需子集）。
 type userInfo struct {
-	Sub               string `json:"sub"`
-	Email             string `json:"email"`
-	EmailVerified     bool   `json:"email_verified"`
-	PreferredUsername string `json:"preferred_username"`
+	Sub               string   `json:"sub"`
+	Email             string   `json:"email"`
+	EmailVerified     bool     `json:"email_verified"`
+	PreferredUsername string   `json:"preferred_username"`
+	Groups            []string `json:"groups"`
 }
 
 // oidcClient 是与 IdP 交互的最小客户端。

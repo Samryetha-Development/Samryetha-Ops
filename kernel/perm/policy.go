@@ -46,6 +46,12 @@ type Policy struct {
 	Extra map[Role][]string
 	// Assign 是身份（OIDC sub 等不可变标识）到角色的映射。
 	Assign map[string]Role
+	// AssignGroups 是**组**（OIDC groups claim，如 Lako 角色名）到角色的映射。
+	//
+	// 与 Assign 的区别：Assign 按不可变 sub 点名字授权，AssignGroups 按 IdP
+	// 维护的组成员关系授权。后者让"加人"变成"在 IdP 里给他一个组"，
+	// 无需改动内核配置——组是 IdP 的事实，内核只信任它。
+	AssignGroups map[string]Role
 	// Default 是未映射身份的角色（默认 viewer=最小权限）。
 	// 本地开发/内网可信场景可设为 admin，但生产必须保持 viewer。
 	Default Role
@@ -53,25 +59,57 @@ type Policy struct {
 
 // DefaultPolicy 返回一个空的策略（仅内建角色，无身份映射）。
 func DefaultPolicy() *Policy {
-	return &Policy{Extra: map[Role][]string{}, Assign: map[string]Role{}, Default: RoleViewer}
+	return &Policy{
+		Extra:        map[Role][]string{},
+		Assign:       map[string]Role{},
+		AssignGroups: map[string]Role{},
+		Default:      RoleViewer,
+	}
 }
 
-// RoleOf 返回身份所属角色。未映射者取 Default（默认 viewer，最小权限）。
+// roleRank 给出角色的权限高低，用于"组成员同时命中多个映射时取最高"。
+func roleRank(r Role) int {
+	switch r {
+	case RoleAdmin:
+		return 3
+	case RoleOperator:
+		return 2
+	case RoleViewer:
+		return 1
+	}
+	return 0
+}
+
+// RoleFor 返回身份所属角色。
 //
-// 立场（docs/architecture.md §7）：以不可变 sub 授权；邮箱可变、可被抢注，
-// 因此不作为授权标识。若使用方坚持用邮箱，须自行确保 email_verified。
+// 判定顺序（不可颠倒）：
+//  1. sub 精确映射——"点名授权"优先级最高，便于对个别人豁免/收紧；
+//  2. 组映射——取命中的最高权限角色，避免结果依赖组的排列顺序；
+//  3. Default（默认 viewer，最小权限）。
 //
 // 安全约束：角色**只能**来自策略，绝不采信请求头/调用方自述——
-// 否则任何插件都能自称 admin。
-func (p *Policy) RoleOf(subject string) Role {
+// 否则任何插件都能自称 admin。组同样来自 IdP 的 claim，不来自请求。
+func (p *Policy) RoleFor(subject string, groups []string) Role {
 	if r, ok := p.Assign[subject]; ok {
 		return r
+	}
+	var best Role
+	for _, g := range groups {
+		if r, ok := p.AssignGroups[g]; ok && roleRank(r) > roleRank(best) {
+			best = r
+		}
+	}
+	if best != "" {
+		return best
 	}
 	if p.Default != "" {
 		return p.Default
 	}
 	return RoleViewer
 }
+
+// RoleOf 只按 sub 判定（无组信息时的简写）。
+func (p *Policy) RoleOf(subject string) Role { return p.RoleFor(subject, nil) }
 
 // CapsOf 返回角色拥有的能力点集合（已展开 "*"）。
 func (p *Policy) CapsOf(r Role) map[string]bool {
@@ -114,6 +152,14 @@ func (p *Policy) Validate() error {
 	for r := range p.Extra {
 		if !known[r] {
 			return fmt.Errorf("perm: extra capabilities for unknown role %q", r)
+		}
+	}
+	for g, r := range p.AssignGroups {
+		if strings.TrimSpace(g) == "" {
+			return fmt.Errorf("perm: empty group in assign_groups")
+		}
+		if !known[r] {
+			return fmt.Errorf("perm: group %q maps to unknown role %q", g, r)
 		}
 	}
 	return nil
