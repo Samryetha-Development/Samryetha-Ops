@@ -21,13 +21,14 @@ type discovery struct {
 	EndSessionEndpoint    string `json:"end_session_endpoint"`
 }
 
-// userInfo 是 userinfo 端点返回的声明（取所需子集）。
+// userInfo 是 userinfo 端点返回的声明（只保留我们真正使用的字段）。
+//
+// 刻意不解析 email_verified：本内核不按邮箱授权，解析它就等于暗示"邮箱可用于
+// 授权"——那正是要避免的误导。保留 email 仅用于登录日志（可审计）。
 type userInfo struct {
-	Sub               string   `json:"sub"`
-	Email             string   `json:"email"`
-	EmailVerified     bool     `json:"email_verified"`
-	PreferredUsername string   `json:"preferred_username"`
-	Groups            []string `json:"groups"`
+	Sub    string   `json:"sub"`
+	Email  string   `json:"email"`
+	Groups []string `json:"groups"`
 }
 
 // oidcClient 是与 IdP 交互的最小客户端。

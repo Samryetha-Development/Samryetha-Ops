@@ -314,7 +314,7 @@ func (d *oidcDriver) handleCallback(w http.ResponseWriter, r *http.Request) {
 		next = safeNext(nc.Value)
 	}
 	d.clearCookie(w, cookieNext)
-	d.logf("auth: login ok for subject %s (groups %v)", id.Subject, id.Groups)
+	d.logf("auth: login ok: sub=%s email=%s groups=%v", id.Subject, info.Email, id.Groups)
 	http.Redirect(w, r, next, http.StatusFound)
 }
 

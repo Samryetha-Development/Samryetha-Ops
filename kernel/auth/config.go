@@ -73,9 +73,10 @@ type Config struct {
 	// policy 里已有的映射优先（单一事实来源仍是 policy）。
 	AdminSubs   []string `json:"admin_subs,omitempty"`
 	AdminGroups []string `json:"admin_groups,omitempty"`
-	// AdminEmails 是可选的邮箱回退：仅当 email_verified=true 时才生效。
-	// 默认不用邮箱授权（邮箱可变、可被抢注），因此通常是空的。
-	AdminEmails []string `json:"admin_emails,omitempty"`
+
+	// 注意：这里**故意没有**按邮箱授权的选项。
+	// 立场（docs/architecture.md §7）：邮箱可变、可被抢注，不作为授权标识。
+	// 想加人请在 IdP 里给组（admin_groups）。
 
 	SessionSecret string `json:"session_secret"`
 	CookieName    string `json:"cookie_name,omitempty"`

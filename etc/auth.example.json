@@ -20,9 +20,7 @@
   "admin_groups": ["samryetha-admins"],
   "admin_subs": [],
 
-  "//7": "admin_emails 是可选的邮箱回退，仅在 email_verified=true 时生效（默认不用）。",
-  "admin_emails": [],
-
+  "//7": "这里故意没有按邮箱授权的选项：邮箱可变、可被抢注，不作为授权标识。",
   "//8": "session_secret 至少 32 字符；可用 openssl rand -base64 48 生成。",
   "session_secret": "REPLACE_WITH_openssl_rand_base64_48",
   "cookie_name": "samryetha_kernel_session",
