@@ -329,6 +329,11 @@ func startServices(root string, table syscall.Table, bus *events.Bus, klog *kern
 	if containsStr(cfg.Plugins["services"], "statuspage") {
 		var targets []statuspage.Target
 		for _, t := range cfg.Targets {
+			// 停用的目标不再纳入观测：否则概览会一直显示它的故障，
+			// 而那是"我们主动关掉的"，不是真故障。
+			if !t.Enabled {
+				continue
+			}
 			name := t.ID
 			tg := statuspage.Target{ID: t.ID, Name: name}
 			if len(t.Health) > 0 {
