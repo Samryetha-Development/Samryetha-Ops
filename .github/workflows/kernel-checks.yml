@@ -42,6 +42,11 @@ jobs:
       - name: go build
         run: go build ./...
 
+      - name: go test (race)
+        # -race 不是可选项：本仓库出过"普通 map 被并发写导致内核崩溃"的事故，
+        # 这类缺陷只有竞态检测能稳定抓住。
+        run: go test -race -count=1 ./...
+
       - name: syscall contract
         run: python3 scripts/check-syscall-contract.py
 

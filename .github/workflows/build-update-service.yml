@@ -1,19 +1,24 @@
-name: Build update-service
+name: Build and release binaries
 
-# update-service 是 Go 单静态二进制（零第三方依赖）。
-# 在这里交叉编译出 linux/amd64 产物并作为 Release 附件发布，
-# 这样生产服务器无需安装 Go —— ops_self_update.sh 直接下载即可。
+# 两个 Go 单静态二进制（零第三方依赖）在这里交叉编译成 linux/amd64，
+# 并作为**同一个 Release** 的附件发布，这样生产服务器无需安装 Go：
+#   - update-service : 旧控制台（ops_self_update.sh 直接下载）
+#   - kernel         : 内核（之前只能手动构建 + scp，没有正规发布路径）
+#
+# 为什么把 kernel 也纳进来：内核是真正在跑部署编排的那个二进制，
+# 但它此前既没有构建产物、也没有发布通道——于是"改代码 → CI → 发布 → 部署"
+# 这条契约对内核是断的，只能靠手改服务器。现在补齐。
 #
 # 发布流程（自动打 tag，不再手工选版本号）：
-#   1. push main → 构建 + 冒烟测试（必须全绿）
+#   1. push main → 两个二进制都构建 + 冒烟测试（必须全绿）
 #   2. 冒烟通过后，由 release job 依据提交信息自动决定版本号并打 tag
-#   3. tag 触发的同一次运行里上传 Release 附件
+#   3. 同一次运行里把两个二进制都作为该 tag 的 Release 附件上传
 #
 # 版本号规则（读最新 vX.Y.Z tag，按提交信息决定）：
 #   [major]  → X+1.0.0
 #   [minor]  → X.Y+1.0
 #   其它     → X.Y.Z+1
-#   [skip release] → 不发布
+#   !release-skip → 不发布
 #
 # 这样服务器始终拉 releases/latest 即可，版本序列连续且可追溯。
 
@@ -23,6 +28,10 @@ on:
   pull_request:
     paths:
       - "update-service/**"
+      - "kernel/**"
+      - "services/**"
+      - "sdk/**"
+      - "cmd/**"
       - ".github/workflows/build-update-service.yml"
   workflow_dispatch:
 
@@ -36,7 +45,7 @@ env:
 
 jobs:
   build:
-    name: Build (linux/amd64)
+    name: Build update-service (linux/amd64)
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -86,10 +95,65 @@ jobs:
             update-service/dist/update-service
             update-service/dist/update-service.sha256
 
+  build-kernel:
+    name: Build kernel (linux/amd64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Verify (gofmt + vet + test)
+        # 与 kernel-checks.yml 同一套门槛，确保"能发布的版本一定是能过检查的版本"。
+        run: |
+          test -z "$(gofmt -l .)" || { echo "gofmt 有未格式化文件:"; gofmt -l .; exit 1; }
+          go vet ./...
+          go test -race -count=1 ./...
+
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          mkdir -p dist
+          go build -trimpath -ldflags "-s -w" -o dist/kernel ./kernel
+          file dist/kernel
+          sha256sum dist/kernel > dist/kernel.sha256
+
+      - name: Smoke test (boots with no config and serves /healthz)
+        # 没有 deploy.yaml 时内核应以"救援模式"启动，但 HTTP 面必须可用。
+        # 这验证的是二进制真的能跑起来，而不是"编译通过"。
+        run: |
+          tmp=$(mktemp -d)
+          KERNEL_ROOT="$tmp" ./dist/kernel -listen 127.0.0.1:3031 >/tmp/kernel.log 2>&1 & pid=$!
+          for i in $(seq 1 10); do
+            curl -fsS -o /dev/null http://127.0.0.1:3031/healthz && break || sleep 0.5
+          done
+          code=$(curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3031/healthz || true)
+          kill "$pid" 2>/dev/null || true
+          cat /tmp/kernel.log
+          [ "$code" = "200" ] || { echo "内核 healthz 未返回 200（got $code）"; exit 1; }
+          curl -s http://127.0.0.1:3031/api/kernel/meta || true
+          echo "smoke ok"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kernel-linux-amd64
+          path: |
+            dist/kernel
+            dist/kernel.sha256
+
   # 构建通过后才发布。只在 main 上跑，PR 不发布。
   release:
     name: Tag + Release
-    needs: build
+    needs: [build, build-kernel]
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
@@ -100,6 +164,11 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: update-service-linux-amd64
+          path: dist
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: kernel-linux-amd64
           path: dist
 
       - name: Decide version
@@ -140,4 +209,6 @@ jobs:
           files: |
             dist/update-service
             dist/update-service.sha256
+            dist/kernel
+            dist/kernel.sha256
           generate_release_notes: true

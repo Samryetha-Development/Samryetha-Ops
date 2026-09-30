@@ -39,6 +39,13 @@ sys.exit(r.returncode)
 PY
 then ok "deploy.yaml 解析正常"; else bad "deploy.yaml 解析失败（或缺少 cmd/cfgcheck）"; fi
 
+step "go test（含 -race：并发缺陷只有靠竞态检测才抓得到）"
+# 为什么必须开 -race：曾有一个普通 map 被 cron 起的多个 goroutine 并发写，
+# 平时编译/运行都"看起来正常"，生产上却以 fatal error 反复崩溃。
+# 这类缺陷不靠 -race 就只能在线上暴露。
+if go test -race -count=1 ./... 2>&1 | tee /tmp/test.out | grep -qE "^(FAIL|--- FAIL)"; then
+  bad "测试失败"; sed 's/^/    /' /tmp/test.out; else ok "测试通过（-race）"; fi
+
 printf '\n'
 if [ "$fail" -eq 0 ]; then echo "全部检查通过 ✓"; else echo "存在失败项 ✗"; fi
 exit "$fail"

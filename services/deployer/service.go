@@ -12,6 +12,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"samryetha/sdk"
@@ -22,12 +23,41 @@ import (
 type Service struct {
 	K   sdk.Kernel
 	Reg *drivers.Registry
-	// running 防止并发部署（同时部署两个目标会互相踩产物目录）
+
+	// running 防止并发部署（同时部署两个目标会互相踩产物目录）。
+	//
+	// mu 是必需的，不是优化：内核对**每个到期任务各起一个 goroutine**
+	// （见 kernel/cron/cron.go 的 tick：`go j.fn()`），而 main 与 dev
+	// 共用 `*/5 * * * *`，会在同一 tick 并发进入 Deploy。
+	// Go 的 map 不支持并发写，没有锁时运行时会直接以
+	// "fatal error: concurrent map writes" 终止**整个内核进程**——
+	// 表现为 systemd 反复重启、在途部署被腰斩、内存态（last_run/事件）丢失。
+	mu      sync.Mutex
 	running map[string]bool
 }
 
 func New(k sdk.Kernel, reg *drivers.Registry) *Service {
 	return &Service{K: k, Reg: reg, running: map[string]bool{}}
+}
+
+// claim 原子地占用某目标的"部署中"名额。返回 false 表示已有部署在跑。
+//
+// 检查与置位必须在同一把锁内完成，否则两个并发调用可能都读到 false。
+func (s *Service) claim(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.running[id] {
+		return false
+	}
+	s.running[id] = true
+	return true
+}
+
+// release 释放名额（配合 defer 使用，保证任何返回路径都会释放）。
+func (s *Service) release(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.running, id)
 }
 
 // Plan 描述一次部署（来自 deploy.yaml 的 target）。
@@ -87,12 +117,11 @@ type StepOutcome struct {
 
 // Deploy 执行一次完整部署。
 func (s *Service) Deploy(ctx context.Context, p Plan) Outcome {
-	// 并发保护：同一目标不允许并行部署
-	if s.running[p.ID] {
+	// 并发保护：同一目标不允许并行部署（见 Service.claim 的说明）
+	if !s.claim(p.ID) {
 		return Outcome{Target: p.ID, State: "skipped", Err: "a deployment for this target is already running"}
 	}
-	s.running[p.ID] = true
-	defer delete(s.running, p.ID)
+	defer s.release(p.ID)
 
 	start := time.Now()
 	out := Outcome{Target: p.ID, Started: start.UnixMilli()}
@@ -408,6 +437,13 @@ func short(rev string) string {
 //   - 回滚后同样要重启并探活（否则运行的还是坏版本）
 //   - 成功后**写标记**，否则状态页会继续显示错误的版本
 func (s *Service) RollbackToPrevious(ctx context.Context, p Plan) (map[string]any, error) {
+	// 人工回滚同样是"改动工作目录 + 重启 + 探活"，必须与定时部署互斥，
+	// 否则两者会同时 reset/重启同一个目标。
+	if !s.claim(p.ID) {
+		return nil, fmt.Errorf("a deployment for %s is already running; try again after it finishes", p.ID)
+	}
+	defer s.release(p.ID)
+
 	cx := &drivers.Context{
 		Ctx: ctx, K: s.K,
 		Target: drivers.TargetRef{ID: p.ID, WorkDir: p.WorkDir, Branch: p.Branch},
