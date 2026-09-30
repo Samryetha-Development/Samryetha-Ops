@@ -114,15 +114,30 @@ type SiteSpec struct {
 
 // --- 迁移驱动 ---
 
+// MigrationSpec 是一次迁移的配置（来自 deploy.yaml 的 migrations 段）。
+//
+// 为什么把它作为参数传入而不是在注册时固定：同一个驱动（如 command）
+// 要为多个目标服务，而每个目标的迁移命令不同。按名字注册的 Registry
+// 无法为每个目标保存不同的配置——传参才是正确的地方。
+type MigrationSpec struct {
+	// Detect 判定"是否需要迁移"的命令：退出码 0 表示需要。
+	// 留空表示无法判定，驱动应保守地视为"需要"。
+	Detect string
+	// Command 执行迁移的命令。
+	Command string
+	// BackupBefore 表示调用方希望先备份。
+	BackupBefore bool
+}
+
 // Migrations 负责数据迁移。
 type Migrations interface {
 	Driver
 	// Needed 判断本次是否真的需要迁移。
-	Needed(cx *Context, changed []string) bool
+	Needed(cx *Context, spec MigrationSpec, changed []string) bool
 	// Backup 迁移前备份（可选，取决于驱动能力）。
-	Backup(cx *Context) (string, error)
+	Backup(cx *Context, spec MigrationSpec) (string, error)
 	// Apply 执行迁移。
-	Apply(cx *Context) error
+	Apply(cx *Context, spec MigrationSpec) error
 }
 
 // --- 备份驱动 ---

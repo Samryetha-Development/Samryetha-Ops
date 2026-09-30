@@ -2,9 +2,11 @@ package deployer
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 
+	"samryetha/sdk"
 	drivers "samryetha/services/drivers"
 )
 
@@ -99,4 +101,40 @@ func TestRunningMapIsRaceFree(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+// nopKernel 只实现该路径会用到的 Log/Emit（其余方法嵌入接口，误用即 panic）。
+type nopKernel struct{ sdk.Kernel }
+
+func (nopKernel) Log(string, string, map[string]any) error    { return nil }
+func (nopKernel) Emit(string, map[string]any) (string, error) { return "", nil }
+
+// fakeSource 让 Deploy 快速走到迁移步骤（fetch/resolve/diff/sync 均为空实现）。
+type fakeSource struct{}
+
+func (fakeSource) Name() string                             { return "fake" }
+func (fakeSource) Capabilities() []string                   { return nil }
+func (fakeSource) Fetch(*drivers.Context) error             { return nil }
+func (fakeSource) Resolve(*drivers.Context) (string, error) { return "rev2", nil }
+func (fakeSource) Reset(*drivers.Context, string) error     { return nil }
+func (fakeSource) Changed(*drivers.Context, string, string) ([]string, error) {
+	return []string{"changed"}, nil
+}
+
+// 配置了迁移却没注册驱动时必须**失败**，而不是静默跳过。
+//
+// 这是真实事故：deployer 用 `if ok` 跳过未注册的驱动，而 command 驱动从未注册，
+// 于是 deploy.yaml 里的 migrations 每次都被无声忽略——迁移永不执行也不报错。
+func TestDeployFailsWhenMigrationDriverMissing(t *testing.T) {
+	reg := drivers.NewRegistry()
+	reg.AddSource(fakeSource{})
+	s := New(nopKernel{}, reg)
+
+	out := s.Deploy(context.Background(), Plan{ID: "t", Source: "fake", MigrationDriver: "not-registered"})
+	if out.State != "failed" {
+		t.Fatalf("缺失迁移驱动应使部署失败，实际 state=%q err=%q", out.State, out.Err)
+	}
+	if !strings.Contains(out.Err, "not registered") {
+		t.Fatalf("错误应说明驱动未注册，实际 %q", out.Err)
+	}
 }

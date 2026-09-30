@@ -29,6 +29,7 @@ import (
 	drivers "samryetha/services/drivers"
 	gitdriver "samryetha/services/drivers/git"
 	healthdriver "samryetha/services/drivers/health"
+	migrationsdriver "samryetha/services/drivers/migrations"
 	processdriver "samryetha/services/drivers/process"
 	"samryetha/services/statuspage"
 )
@@ -246,6 +247,8 @@ func startServices(root string, table syscall.Table, bus *events.Bus, klog *kern
 	reg.AddHealth(healthdriver.NewHTTP(k))
 	reg.AddHealth(healthdriver.NewTCP(k))
 	reg.AddHealth(healthdriver.NewExec(k))
+	// 迁移驱动：此前从未注册，导致 deploy.yaml 里的 migrations 配置静默失效。
+	reg.AddMigrations(migrationsdriver.New(k))
 
 	var loaded []string
 

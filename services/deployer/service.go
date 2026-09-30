@@ -206,18 +206,30 @@ func (s *Service) Deploy(ctx context.Context, p Plan) Outcome {
 		return s.finish(out, start, "failed", "diff failed")
 	}
 
+	// 迁移配置来自该目标的 Plan，必须随调用传给驱动（见 drivers.MigrationSpec）
+	spec := drivers.MigrationSpec{
+		Detect:       p.MigrationDetect,
+		Command:      p.MigrationCmd,
+		BackupBefore: p.BackupBefore,
+	}
+
 	// 4) 迁移前备份（可选）
 	if p.BackupBefore && p.MigrationDriver != "" {
-		if m, ok := s.Reg.Migrations(p.MigrationDriver); ok {
-			if !step("backup", func() error {
-				path, err := m.Backup(cx)
-				if err == nil && path != "" {
-					cx.Log("info", "backup at "+path, nil)
-				}
-				return err
-			}) {
-				return s.finish(out, start, "failed", "pre-migration backup failed")
+		m, ok := s.Reg.Migrations(p.MigrationDriver)
+		if !ok {
+			// 以前这里是 `if ok`：驱动没注册时静默跳过，表现为"配置了迁移却从不执行"。
+			// 配置与能力不符必须显式失败——静默失效比报错危险得多。
+			return s.finish(out, start, "failed",
+				fmt.Sprintf("migration driver %q not registered (configured in deploy.yaml)", p.MigrationDriver))
+		}
+		if !step("backup", func() error {
+			path, err := m.Backup(cx, spec)
+			if err == nil && path != "" {
+				cx.Log("info", "backup at "+path, nil)
 			}
+			return err
+		}) {
+			return s.finish(out, start, "failed", "pre-migration backup failed")
 		}
 	}
 
@@ -238,14 +250,18 @@ func (s *Service) Deploy(ctx context.Context, p Plan) Outcome {
 
 	// 7) 迁移
 	if p.MigrationDriver != "" {
-		if m, ok := s.Reg.Migrations(p.MigrationDriver); ok {
-			if m.Needed(cx, out.Changed) {
-				if !step("migrate", func() error { return m.Apply(cx) }) {
-					return s.finish(out, start, "failed", "migration failed")
-				}
-			} else {
-				out.Steps = append(out.Steps, StepOutcome{Name: "migrate", OK: true, Note: "not needed"})
+		m, ok := s.Reg.Migrations(p.MigrationDriver)
+		if !ok {
+			// 同上：不再静默跳过（那会让代码与 schema 悄悄漂移）
+			return s.finish(out, start, "failed",
+				fmt.Sprintf("migration driver %q not registered (configured in deploy.yaml)", p.MigrationDriver))
+		}
+		if m.Needed(cx, spec, out.Changed) {
+			if !step("migrate", func() error { return m.Apply(cx, spec) }) {
+				return s.finish(out, start, "failed", "migration failed")
 			}
+		} else {
+			out.Steps = append(out.Steps, StepOutcome{Name: "migrate", OK: true, Note: "not needed"})
 		}
 	}
 

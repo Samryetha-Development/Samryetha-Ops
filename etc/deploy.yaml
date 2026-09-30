@@ -75,12 +75,22 @@ targets:
     # 部署成功后写这个文件，状态页据此显示"已部署版本"。
     # 不写会导致"代码已更新、页面仍显示待部署"的错觉。
     marker: "markers:.last-deployed"
-    # 迁移钩子：有迁移文件变更时才执行
-    migrations:
-      driver: command
-      detect: "git diff --name-only HEAD@{1} HEAD | grep -c '^backend/drizzle/' || true"
-      command: "cd backend && npm run migrate"
-      backup_before: true
+    # 迁移：本项目**没有** deploy 期迁移步骤。
+    #
+    # 这里原先写着 `cd backend && npm run migrate` 并检测 `backend/drizzle/`，
+    # 但后端早已是 Python（pyproject/uv），既没有 package.json 也没有 drizzle 目录。
+    # 更要命的是当时 deployer 用 `if ok` 判断驱动是否存在，而 command 驱动从未注册，
+    # 于是这段配置**静默失效**：看起来配了迁移，实际一次也没跑过、也不报错。
+    #
+    # 处置：
+    #   1) 删掉这段虚构配置（它描述的不是事实）；
+    #   2) deployer 改为"配置了迁移但驱动未注册 → 失败"，让这类错误无法再静默；
+    #   3) command 驱动已实现，将来确有迁移时按下例配置即可：
+    #        migrations:
+    #          driver: command
+    #          detect: "git diff --name-only HEAD@{1} HEAD -- backend/... | grep -q ."
+    #          command: "cd backend && <真正的迁移命令>"
+    #          backup_before: false
 
   - id: dev
     enabled: true
