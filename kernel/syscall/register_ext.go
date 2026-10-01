@@ -112,7 +112,14 @@ func registerFS(t Table, d Deps) {
 		if err != nil {
 			return nil, &CallError{Code: "fs_error", Message: err.Error()}
 		}
-		return map[string]any{"items": items}, nil
+		// 必须转成 []any 再交出去：内建服务是 Go 直调，[]string **不是** []any，
+		// 调用方按 JSON 形态断言（`d["items"].([]any)`）会静默失败。
+		// 症状极具迷惑性：目录明明有文件，服务拿到的却是空列表——没有任何报错。
+		asAny := make([]any, 0, len(items))
+		for _, it := range items {
+			asAny = append(asAny, it)
+		}
+		return map[string]any{"items": asAny}, nil
 	}
 }
 
@@ -204,7 +211,9 @@ func registerLog(t Table, d Deps) {
 			return nil, e
 		}
 		if d.LogQuery == nil {
-			return map[string]any{"items": []any{}}, nil
+			// 与 Config/FS 一致：组件没接上就报 unavailable，不返回空列表。
+			// 返回空列表会让"没人实现"伪装成"确实没有日志"，排查时极其误导。
+			return nil, &CallError{Code: "unavailable", Message: "log query not wired"}
 		}
 		limit := int(i64(c.Args["limit"], 200))
 		q := str(c.Args["q"], "")
@@ -225,7 +234,7 @@ func registerEvents2(t Table, d Deps) {
 		since := i64(c.Args["since"], 0)
 		return map[string]any{
 			"mode":  "cursor",
-			"items": d.Bus.History(topic, since, 100),
+			"items": envelopeMaps(d.Bus.History(topic, since, 100)),
 		}, nil
 	}
 }

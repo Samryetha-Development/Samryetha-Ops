@@ -117,10 +117,18 @@ func FsList(k Kernel, path string) ([]string, error) {
 		return nil, err
 	}
 	var out []string
-	if arr, ok := d["items"].([]any); ok {
+	// 两种形态都要接受：内建服务走 Go 直调时实现可能给出 []string，
+	// 外部经 JSON 往返后是 []any。只认一种会让"目录里明明有文件、
+	// 调用方却拿到空列表"这种错静默发生——内核侧的 fs.list 已统一成 []any，
+	// 这里是第二道防线。
+	switch arr := d["items"].(type) {
+	case []any:
+		out = make([]string, 0, len(arr))
 		for _, x := range arr {
 			out = append(out, stringify(x))
 		}
+	case []string:
+		out = append([]string(nil), arr...)
 	}
 	return out, nil
 }

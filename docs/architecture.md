@@ -73,7 +73,7 @@
 | 调用 | 参数 | 返回 | perm |
 |---|---|---|---|
 | `log.write` | `level,msg,fields` | `{}` | — |
-| `log.query` | `since,limit,level,q` | `entries[]` | `log.read` |
+| `log.query` | `source,q,limit` | `entries[]（{ts,level,msg,source}）` | `log.read` |
 
 **事件**
 | 调用 | 参数 | 返回 | perm |
@@ -87,7 +87,12 @@
 |---|---|---|---|
 | `store.get` / `store.set` / `store.del` | `ns,key,[val]` | `{val}` | `store.own` |
 | `store.list` | `ns,prefix` | `keys[]` | `store.own` |
-| `fs.read` / `fs.write` / `fs.list` | `path,[data]` | — | `fs:<scope>` |
+| `fs.read` / `fs.write` / `fs.list` | `path,[data]` | `{items}`（`fs.list`） | `fs.read` / `fs.write` / `fs.list` |
+
+> `fs.*` 的 `path` 一律是**范围前缀**形式（`logs:update.log`、`status:data/x.json`），
+> 范围由内核按 `managed_root` 算出并登记（见 `kernel/wiring.go`），权限检查是
+> "能力点决定能不能调，范围决定能碰哪里"。**服务里不得出现绝对路径**：
+> 写死 `/opt/...` 会让"换一份配置就换一个项目"这条主张悄悄失效。
 
 **配置**
 | 调用 | 参数 | 返回 | perm |
@@ -132,7 +137,33 @@
 > 说明：`proc.*` 与 `task.*` 刻意保持**领域中立**——内核只管"起一个进程/跑一个任务"，
 > 不管它是构建、是部署、还是采集指标。这正是"内核不知道更新"的落地方式。
 
-### 4.2 事件信封
+### 4.2 形态契约（入参与返回值都算）
+
+同一张 syscall 表有两个后端，参数与返回值的 Go 类型因此**不一样**：
+
+| | 入参 | 返回值 |
+|---|---|---|
+| 内建（Go 直调） | 原始 Go 类型（`[]map[string]any`、`int`…） | 原始 Go 类型（`[]string`、`events.Envelope`…） |
+| 外部（HTTP/JSON） | `map[string]any` / `[]any` | `map[string]any` / `[]any` |
+
+规则：**调用方只按 JSON 形态解析，实现方负责把返回值统一成 JSON 形态。**
+参数侧的转换集中在 `kernel/syscall/register.go` 的 `toAnyMap` 等辅助里；
+返回值侧不能靠"希望它恰好是 map"，必须显式转换（`envelopeMaps`、`fs.list` 的 `[]any`）。
+
+这条规则是踩出来的，且两次踩的都是同一个坑——类型断言失败**不报错**，
+只是安静地给出零值：
+
+- `event.history` 原样返回 `[]events.Envelope`，而内建服务写的是
+  `items[i].(map[string]any)`：事件发了、查询也返回了，服务却什么都读不到。
+  表现为控制台里每个目标的最近状态永远 `unknown`、回滚找不到上一版可回退的版本。
+- `fs.list` 原样返回 `[]string`，而 `sdk.FsList` 断言 `[]any`：
+  日志目录里明明有备份文件，面板却是空的。
+
+所以：**给 syscall 加返回值时，先问"内建服务拿到它是什么类型"**，
+并在 `kernel/syscall/*_test.go` 里直接打处理器断言形态——只测转换函数会漏掉
+"处理器忘了转换"。
+
+### 4.3 事件信封
 
 ```json
 {

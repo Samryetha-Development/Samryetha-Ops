@@ -77,6 +77,38 @@ func (k *kernelLog) tail(n int) []kvLine {
 	return out
 }
 
+// sourceOf 判定一条日志的来源：服务经 syscall 写日志时内核会带上 plugin 字段，
+// 没带的（内核自己写的）归为 "kernel"。
+//
+// 为什么必须给默认值：内核自身的日志 Meta 是空的，于是按来源筛选时
+// "kernel" 一条也匹配不到——控制台的"日志 → kernel"永远空白，
+// 看上去像内核从不写日志，实际是筛选口径漏了默认来源。
+func sourceOf(it kvLine) string {
+	if it.Meta != nil {
+		if p, _ := it.Meta["plugin"].(string); p != "" {
+			return p
+		}
+	}
+	return "kernel"
+}
+
+// asNumber 把配置里的数值统一成 float64。
+//
+// 为什么需要：配置有两个来源，数字类型并不一致——deploy.yaml 走自带解析器，
+// 整数是 int；JSON 配置解出来是 float64。只断言其中一种，会让另一种来源里
+// 写下的配置**静默失效**（界面看不出任何异常，只是行为永远停在默认值）。
+func asNumber(v any) (float64, bool) {
+	switch n := v.(type) {
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case float64:
+		return n, true
+	}
+	return 0, false
+}
+
 // 包级引用：renderShell 需要 shell/outcome，但它们是 main 的局部变量。
 // 显式提升为包级，避免给每个 handler 都传一遍。
 var (
@@ -180,6 +212,31 @@ func main() {
 		Config: wire.Config, FS: wire.FS, Routes: wire.Routes, Cron: wire.Cron,
 		Actions: wire.Actions, Root: *root,
 		Log: func(level, msg string, fields map[string]any) { klog.add(level, msg, fields) },
+		// LogQuery 此前只声明、从未赋值：log.query 于是永远返回空列表——
+		// 调用方看到的是"没有日志"，而不是"这个调用没人实现"。这里补上真实实现，
+		// 与 /api/kernel/log 的口径保持一致（同为来源筛选 + 子串匹配）。
+		LogQuery: func(source, q string, limit int) []any {
+			if limit <= 0 {
+				limit = 200
+			}
+			items := klog.tail(0)
+			out := make([]any, 0, len(items))
+			for _, it := range items {
+				if source != "" && sourceOf(it) != source {
+					continue
+				}
+				if q != "" && !strings.Contains(it.Msg, q) {
+					continue
+				}
+				out = append(out, map[string]any{
+					"ts": it.TS, "level": it.Level, "msg": it.Msg, "source": sourceOf(it),
+				})
+			}
+			if len(out) > limit {
+				out = out[len(out)-limit:]
+			}
+			return out
+		},
 	})
 
 	// --- 服务加载（仅正常态；救援模式不加载任何服务）---
@@ -318,8 +375,11 @@ func startServices(root string, table syscall.Table, bus *events.Bus, klog *kern
 	// 间隔可配（deployer.ui_refresh_seconds），默认 60s。
 	uiRefresh := time.Minute
 	if v, ok := wire.Config.Get("deployer.ui_refresh_seconds"); ok {
-		if f, ok := v.(float64); ok && f > 0 {
-			uiRefresh = time.Duration(f) * time.Second
+		// 只断言 float64 是不够的：deploy.yaml 由自带解析器读入，整数是 int，
+		// 于是 `ui_refresh_seconds: 1` 会被静默忽略、永远停在默认间隔。
+		// 配置"写了却不生效"是本项目最常见的病，这里按数值统一取值。
+		if f, ok := asNumber(v); ok && f > 0 {
+			uiRefresh = time.Duration(f * float64(time.Second))
 		}
 	}
 	dep.StartUIRefresh(context.Background(), allPlans, scheduleMap, uiRefresh)
@@ -420,10 +480,8 @@ func registerKernelAPI(mux *http.ServeMux, klog *kernelLog, bus *events.Bus, tab
 		if src := r.URL.Query().Get("source"); src != "" {
 			filtered := make([]kvLine, 0)
 			for _, it := range items {
-				if it.Meta != nil {
-					if p, _ := it.Meta["plugin"].(string); p == src {
-						filtered = append(filtered, it)
-					}
+				if sourceOf(it) == src {
+					filtered = append(filtered, it)
 				}
 			}
 			items = filtered

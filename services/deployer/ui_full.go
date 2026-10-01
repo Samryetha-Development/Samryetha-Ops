@@ -133,7 +133,10 @@ func (s *Service) DeclareFullUI(ctx context.Context, plans []Plan, schedule map[
 		"settings.sections": sections,
 		"panels":            panels,
 		"logs.sources": {
-			{"kind": "text", "id": "deployment", "label": "deployment"},
+			// id 必须与内核日志里记录的服务名一致，否则按来源筛选永远 0 条。
+			// 这里曾写作 "deployment"，而服务的名字是 deployer——
+			// 于是"日志 → deployment"是一块永远空白的面板。
+			{"kind": "text", "id": "deployer", "label": "deployer"},
 			{"kind": "text", "id": "kernel", "label": "kernel"},
 			{"kind": "text", "id": "statuspage", "label": "statuspage"},
 		},
@@ -304,51 +307,146 @@ func (s *Service) gitLog(ctx context.Context, plans []Plan) ([]commit, error) {
 
 type backup struct{ name, when string }
 
+// backupList 列出数据库备份。
+//
+// 路径来自内核登记的范围（logs: → <managed_root>/logs），不再写死
+// /opt/Samryetha/logs：范围本身是按配置算出来的，换项目只需换配置。
 func (s *Service) backupList(ctx context.Context) []backup {
-	v, err := s.runCapture(ctx, "ls -1dt /opt/Samryetha/logs/db-backup-* 2>/dev/null | head -10")
+	names, err := sdk.FsList(s.K, "logs:")
 	if err != nil {
 		return nil
 	}
-	var out []backup
-	for _, line := range strings.Split(strings.TrimSpace(v), "\n") {
-		if line == "" {
-			continue
+	return pickBackups(names, 10)
+}
+
+// pickBackups 从目录条目里挑出备份：前缀匹配、按名字倒序（新的在前）、最多 n 个。
+//
+// 按名字排序就够，是因为备份名自带 db-backup-YYYYmmdd-HHMMSS 时间戳，
+// 字典序与时间序一致——为此再 stat 一遍每个文件是多余的系统调用。
+func pickBackups(names []string, n int) []backup {
+	picked := make([]string, 0, len(names))
+	for _, name := range names {
+		if strings.HasPrefix(name, backupNamePrefix) && !strings.HasSuffix(name, "/") {
+			picked = append(picked, name)
 		}
-		parts := strings.Split(line, "/")
-		out = append(out, backup{name: parts[len(parts)-1]})
+	}
+	sort.Sort(sort.Reverse(sort.StringSlice(picked)))
+	if n > 0 && len(picked) > n {
+		picked = picked[:n]
+	}
+	out := make([]backup, 0, len(picked))
+	for _, name := range picked {
+		out = append(out, backup{name: name, when: backupTime(name)})
 	}
 	return out
+}
+
+// backupNamePrefix 是备份步骤产出的文件前缀。
+const backupNamePrefix = "db-backup-"
+
+// backupTime 从备份名里解出时间；名字不符合约定时返回空串——
+// 宁可在"时间"列留白，也不要显示一个猜出来的时间。
+func backupTime(name string) string {
+	ts := strings.TrimPrefix(name, backupNamePrefix)
+	if len(ts) < 15 {
+		return ""
+	}
+	t, err := time.Parse("20060102-150405", ts[:15])
+	if err != nil {
+		return ""
+	}
+	return t.Format("2006-01-02 15:04:05")
 }
 
 type auditEntry struct{ when, action, detail string }
 
+// auditList 取最近的部署事件作为操作审计。
+//
+// 数据源为什么是事件而不是某个日志文件：日志文件由写它的那个更新器决定
+// 何时轮转、何时停写——旧更新器退役后它就不再增长。这里此前 tail 的
+// <managed_root>/logs/update.log 是 2026-09-26 之后就再没更新的文件，
+// 面板看着有内容，展示的却是退役目标（ops）的陈年输出。
+// 事件流是内核维护的、跨重启保留的事实来源，且天然只记"操作"。
 func (s *Service) auditList(ctx context.Context) []auditEntry {
-	v, err := s.runCapture(ctx, "tail -8 /opt/Samryetha/logs/update.log 2>/dev/null")
-	if err != nil || strings.TrimSpace(v) == "" {
+	ev, err := sdk.CallGeneric(s.K, "event.history", map[string]any{"topic": "deployment", "limit": 8})
+	if err != nil {
 		return nil
 	}
-	var out []auditEntry
-	for _, line := range strings.Split(strings.TrimSpace(v), "\n") {
-		if line == "" {
-			continue
+	items, _ := ev["items"].([]any)
+	out := make([]auditEntry, 0, len(items))
+	// 事件历史按时间升序返回；审计要看"最近发生了什么"，因此倒序，最新在前。
+	for i := len(items) - 1; i >= 0; i-- {
+		m, _ := items[i].(map[string]any)
+		if e, ok := auditRow(m); ok {
+			out = append(out, e)
 		}
-		when, detail := "", line
-		if len(line) > 19 {
-			when, detail = line[:19], line[19:]
-		}
-		out = append(out, auditEntry{when: when, detail: strings.TrimSpace(detail)})
 	}
 	return out
 }
 
-func (s *Service) configNotice(ctx context.Context) string {
-	if v, err := s.runCapture(ctx, "cat /opt/Samryetha/status/data/config-notice.json 2>/dev/null"); err == nil {
-		t := strings.TrimSpace(v)
-		if t != "" && t != "{}" {
-			return t
-		}
+// auditRow 把一条部署事件转成一行审计。
+//
+// 同时容忍 int64 与 float64 的时间戳：内建服务经 Go 直调拿到的是原值，
+// 外部经 JSON 往返后数字会变成 float64，两种形态都必须能读。
+func auditRow(m map[string]any) (auditEntry, bool) {
+	if m == nil {
+		return auditEntry{}, false
 	}
-	return ""
+	pl, _ := m["payload"].(map[string]any)
+	if pl == nil {
+		return auditEntry{}, false
+	}
+	target, _ := pl["target"].(string)
+	state, _ := pl["state"].(string)
+	if target == "" && state == "" {
+		return auditEntry{}, false
+	}
+
+	when := ""
+	switch ts := m["ts"].(type) {
+	case int64:
+		when = time.UnixMilli(ts).Format("2006-01-02 15:04:05")
+	case float64:
+		when = time.UnixMilli(int64(ts)).Format("2006-01-02 15:04:05")
+	}
+
+	action := state
+	if action == "" {
+		topic, _ := m["topic"].(string)
+		action = strings.TrimPrefix(topic, "deployment.")
+	}
+	detail := target
+	if to, _ := pl["to"].(string); to != "" {
+		if len(to) > 10 {
+			to = to[:10]
+		}
+		detail += " → " + to
+	}
+	switch d := pl["duration_ms"].(type) {
+	case int64:
+		detail += fmt.Sprintf(" (%dms)", d)
+	case float64:
+		detail += fmt.Sprintf(" (%.0fms)", d)
+	}
+	if e, _ := pl["error"].(string); e != "" {
+		detail += " · " + e
+	}
+	return auditEntry{when: when, action: action, detail: strings.TrimSpace(detail)}, true
+}
+
+// configNotice 读配置提醒（由外部流程写入被管理系统的 status/data 下）。
+//
+// 范围 status: 同样由内核按配置登记，因此这里不再出现绝对路径。
+func (s *Service) configNotice(ctx context.Context) string {
+	v, err := sdk.FsRead(s.K, "status:data/config-notice.json")
+	if err != nil {
+		return ""
+	}
+	t := strings.TrimSpace(v)
+	if t == "" || t == "{}" {
+		return ""
+	}
+	return t
 }
 
 // runCapture 经内核跑命令并取回**真实 stdout**。

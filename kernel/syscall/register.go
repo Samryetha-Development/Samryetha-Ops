@@ -152,7 +152,7 @@ func Register(d Deps) Table {
 		topic := str(c.Args["topic"], "")
 		since := i64(c.Args["since"], 0)
 		limit := int(i64(c.Args["limit"], 200))
-		return map[string]any{"items": d.Bus.History(topic, since, limit)}, nil
+		return map[string]any{"items": envelopeMaps(d.Bus.History(topic, since, limit))}, nil
 	}
 
 	// ---- 存储 ----
@@ -396,6 +396,25 @@ func checkPerm(d Deps, call Call) *CallError {
 
 // allow 保留为薄封装，让各注册文件读起来一致。
 func allow(d Deps, c Call, args map[string]any) *CallError { return checkPerm(d, c) }
+
+// envelopeMaps 把事件信封统一成 map 形态再交出去。
+//
+// 为什么必须在这一层转换：上面那条"两条路径"的注意事项说的是**入参**，
+// 但**返回值**同样有两条形态——内建服务经 Go 直调拿到的是 events.Envelope 结构体，
+// 外部（HTTP/JSON）拿到的是 map。服务侧只会按一种形态解析，于是按 map 写的断言
+// 直调时静默失败：事件确实发了、history 也确实返回了，调用方却什么都读不到。
+// 实际后果是目标状态永远显示 unknown、回滚找不到上一版可回退的版本。
+// 集中转一次，让调用方无论走哪条路径都只需解析 map。
+func envelopeMaps(envs []events.Envelope) []any {
+	out := make([]any, 0, len(envs))
+	for _, e := range envs {
+		out = append(out, map[string]any{
+			"id": e.ID, "topic": e.Topic, "ts": e.TS,
+			"source": e.Source, "actor": e.Actor, "payload": e.Payload,
+		})
+	}
+	return out
+}
 
 // ---- 参数转换辅助 ----
 //
