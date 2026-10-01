@@ -166,6 +166,35 @@ ops_self_update.sh             旧控制台自更新（其组件已退役）
 
 同一轮加了 `--set-interval` 调试开关，见 §6.6。
 
+### 3.3 v1.4.6：面板"有标题没内容"的根因与验收
+
+**现象**（用户截图）：进程 / 磁盘与资源 / 最近提交（main）三块只有标题和 `deployer` 徽标、
+正文空白；设置区只有"main 调度 / dev 调度"两个小标题，**一个输入框都没有**；
+日志面板默认停在 `statuspage` 上显示"(空)"。
+
+**根因**：`buildComponent` 对 `items` / `fields` / `bars` 用 `.([]any)` 断言，
+`ui.declare` 对 `nav` 同样。内建服务传进来的是 Go 的 `[]map[string]any`，
+断言失败**不报错**，数据被静默丢弃——面板标题照样渲染，所以看起来像"功能没做"。
+`rows` / `columns` 早就走 `toAnyList`，因此两个表格面板正常，正好把规律掩盖了。
+
+**修**（`7306077`）：四处统一走 `toAnyList`/`toAnyMap`；日志面板由外壳提供"全部"选项
+并在首屏就加载，空态也改成说明性文字而不是"(空)"。
+
+**线上验收**（v1.4.6，自签会话）：
+
+| 面板 | 验收结果 |
+|---|---|
+| 进程 | 5 个 pm2 进程带状态/内存/重启数 ✓ |
+| 磁盘与资源 | disk 31% 已用、mem 32%、load、uptime ✓ |
+| 最近提交（main） | `60687db Merge pull request #66 …` ✓ |
+| 设置 | 4 个字段（`schedule.main/dev`、`enabled.main/dev`）✓ |
+| 日志 | 默认"全部"、首屏即加载、16 条条目 ✓ |
+
+⚠️ **这次修复顺带暴露了一个摆设**：设置区那些输入框**既没有保存按钮，也没有任何代码
+读 `schedule.*` / `enabled.*`**——真正生效的调度只在 `deploy.yaml` 的 `schedule:` 段。
+之前它被上面那个解析 bug 挡住、根本看不见；现在看得见了，改了却不会有任何效果。
+这是本项目头号病的又一例，见 §8.A.11。
+
 ---
 
 ## 4. 认证与授权（必读）
@@ -392,12 +421,23 @@ sudo systemctl start samryetha-kernel-update.service   # 或者：根本不等�
      （那会引入第二个真相来源）。
 8. **`config.list` 返回的 `items` 是 map 不是 list**（`kernel/syscall/register_ext.go`），
    与调用名和文档描述都不符；目前无消费者，属于"埋着的雷"。
-9. **改动上线状态**：`ae82f76` / `469f4f3` / `2720999` / `3b6043b` 已随 `v1.4.2`、`v1.4.3`
-   上线并逐项验收（见 §3.2）。内核二进制要经 push → CI → Release → `kernel_self_update.sh`
-   才生效；急的话不必等 timer：`sudo systemctl start samryetha-kernel-update.service`。
+9. **改动上线状态**：`ae82f76` / `469f4f3` / `2720999` / `3b6043b` / `7306077` 已随
+   `v1.4.2` / `v1.4.3` / `v1.4.6` 上线并逐项验收（见 §3.2、§3.3）。内核二进制要经
+   push → CI → Release → `kernel_self_update.sh` 才生效；急的话不必等 timer：
+   `sudo systemctl start samryetha-kernel-update.service`。
 10. **`kernel/scripts/*.sh` 与 `etc/` 都没有自动同步通道**（与 §8.A.2 同源）：
    本轮加的 `--set-interval` 只在仓库里，服务器那份脚本要手工同步才会出现。
    在那之前，间隔仍可用 systemd drop-in 直接表达（见 §6.6）。
+11. **设置区的调度字段是摆设**（§3.3 的副产品）：输入框没有保存按钮、前端也没有收集
+   `data-field` 的代码，后端更没有任何读取方——真正生效的调度在 `deploy.yaml`。
+   要么**先撤掉这些控件**（不要展示改了没用的东西），要么**真接线**：
+   `config.set` 本身能持久化（写到 `<root>/var/config.json`），缺的是
+   ①前端保存逻辑、②让 deployer/装配层把配置树里的 `schedule.<id>` / `enabled.<id>`
+   当作覆盖值（并决定"改完立即生效还是重启生效"）。**先跟人定范围再动手。**
+12. **更新脚本没有降级保护**：`kernel_self_update.sh` 判定条件是 `REL != LAST`，
+   **不比较版本先后**。若 GitHub 上的 Latest 指向了比当前更旧的 tag
+   （有人手动改 Latest、或删掉最新 Release），脚本会**静默降级**内核。
+   要修就做版本号排序比较，或额外读 `published_at` 只允许向前走。
 
 ### 8.B 本轮已修（原 §8.4 / §8.5）
 
@@ -425,6 +465,7 @@ sudo systemctl start samryetha-kernel-update.service   # 或者：根本不等�
 | **顺序错误：先上执行代码、后同步配置** | 我在 23:06–23:37 让 main 部署持续失败：先上了"让 migrations 真执行"，服务器配置却还写着 `npm run migrate`。**改行为前先把环境配置同步好。** |
 | 直接改服务器文件 | 除非是 `etc/` 配置（目前无自动通道），否则一律走"改代码 → 推 dev/main → 让更新器部署" |
 | **syscall 的返回值也有两种形态** | 入参要容忍 map 与原始 Go 类型（早有辅助），**返回值同样要统一**：内建服务拿到的是 `[]string` / `events.Envelope`，按 `[]any` / `map[string]any` 断言会**静默给出零值**。两个真实后果：每个目标状态永远 `unknown`、备份面板永远空白。见 `docs/architecture.md` §4.2 |
+| **同一个形态错误会在一处代码里重复四遍** | `buildComponent` 的 `items` / `fields` / `bars` 与 `ui.declare` 的 `nav` 各自断言了一次 `[]any`，于是"进程、磁盘、最近提交、设置表单、导航"一起变空。修的时候要**成组地找**同类断言（`grep '\.(\[\]any)'`），别只修被截图指出的那一个 |
 | **只跑单测就以为改对了** | 本轮三个缺陷（`fs.list` 返回类型、`ui_refresh_seconds` 的 int/float64 错配、事件形态）在单测全绿的情况下依然存在，是**本地起真内核**跑出来的。§6.5 给了 20 行可复制的复现脚本 |
 | **夹具比线上更规整** | 线上备份是**目录**，我的烟雾夹具却用 `touch` 造**文件**：本地全绿、线上面板空白。**夹具要照抄线上形态**（§3.2） |
 | **配置数值的类型取决于来源** | `deploy.yaml` 经自带解析器 → `int`；JSON 配置 → `float64`。只断言一种，另一种来源里写的值就**静默失效**（`ui_refresh_seconds: 1` 因此永远停在 60s 默认值）。取值统一走 `asNumber` |
