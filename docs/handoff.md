@@ -228,6 +228,19 @@ ops_self_update.sh             旧控制台自更新（其组件已退役）
 **字符串**而不是映射，且不报错）。服务器上的 `deploy.yaml` 用的是块风格所以没事，
 但手写配置时别用 `{}` / `[]` 内联写法，见 §8.A.13。
 
+**线上验收（v1.4.7，在 dev 上真写了一次）**：
+
+| 步骤 | 结果 |
+|---|---|
+| 只读：`deploy.yaml` vs 实际注册 | `*/5` ↔ `deploy:main */5`、`deploy:dev */5` ✓ |
+| 面板回显 | `schedule.main/dev = */5 * * * *`、开关按生效值选中 ✓ |
+| `config.set enabled.dev=false` | `deploy:dev` **立即从 cron 列表消失** ✓ |
+| 写回 `true` | `deploy:dev */5` 回来 ✓ |
+| 清理 | 删掉 `var/config.json` 里的覆盖值 + 重启 → 回到"只有 deploy.yaml"的状态 ✓ |
+
+清理步骤写在 §6.7——**保存会产生优先级高于 `deploy.yaml` 的持久覆盖值**，
+而目前没有"恢复默认"按钮，这一点必须让人知道。
+
 ---
 
 ## 4. 认证与授权（必读）
@@ -401,6 +414,28 @@ sudo systemctl start samryetha-kernel-update.service   # 或者：根本不等�
   token——少一个秘密要保管，而默认 15 分钟只占 4 次/小时。代价是**别把间隔设到 5 分钟
   以下**：2 分钟就是 30 次/小时，1 分钟直接打满 60 次/小时，`--status` 之类也会被限流。
   真需要更密集时再谈 token（classic PAT 零 scope 即可，认证本身就把额度抬到 5,000/小时）。
+
+### 6.7 撤销控制台写入的覆盖值（调度 / 自动部署开关）
+
+控制台"设置"里保存的值进配置树（`<root>/var/config.json`），**优先级高于
+`deploy.yaml`**。目前**没有"恢复默认"按钮**，所以撤销要手工做；
+而且内核只在启动时读这个文件，所以**改完必须重启**（否则下一次 `config.set`
+会把内存里的旧值再写回来）：
+
+```bash
+sudo python3 - <<'PY'
+import json
+p = "/opt/Samryetha/kernel/var/config.json"
+d = json.load(open(p))
+for k in ("enabled", "schedule"):
+    d.pop(k, None)          # 只删覆盖值，其余配置保留
+json.dump(d, open(p, "w"), ensure_ascii=False, indent=2)
+PY
+sudo systemctl restart samryetha-kernel
+```
+
+验证：`/api/kernel/cron` 应回到 `deploy.yaml` 里的排期（自签会话见 §6.2）。
+**只删文件不重启是无效的**，这一点最容易被忽略。
 
 ---
 
