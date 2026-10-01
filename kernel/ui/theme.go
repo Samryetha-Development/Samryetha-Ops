@@ -187,7 +187,7 @@ textarea,input[type=text],input[type=password],input[type=number],select{
 
   {{with index .Slots "settings.sections"}}{{if nonempty .}}
   <section class="card">
-    <div class="card-h"><h2>设置</h2></div>
+    <div class="card-h"><h2>设置</h2><button class="btn" id="settings-save">保存</button></div>
     {{range .}}
       <h3 style="font-size:13px;margin:14px 0 10px">{{.Title}}</h3>
       {{range .Fields}}
@@ -275,6 +275,30 @@ async function loadLog(){
 document.getElementById('log-refresh')?.addEventListener('click',loadLog);
 document.getElementById('log-src')?.addEventListener('change',loadLog);
 loadLog();   // 首屏就加载，别等用户先点一下
+
+// 设置表单的保存：把每个 [data-field] 写回配置树。
+//
+// 为什么要有这一步：这些输入框此前**没有任何保存路径**——既没有按钮，也没有
+// 收集 data-field 的代码，于是"能填、能选、什么都没发生"。现在逐个调 config.set
+// （内核会持久化到 var/config.json），内核随即重算调度并重声明面板，
+// 所以保存后刷新页面看到的就是生效值。
+document.getElementById('settings-save')?.addEventListener('click', async ()=>{
+  const btn=document.getElementById('settings-save');
+  const fields=[...document.querySelectorAll('[data-field]')];
+  if(!fields.length) return;
+  btn.disabled=true;
+  try{
+    for(const f of fields){
+      await kernelCall('config.set',{path:f.dataset.field,value:f.value});
+    }
+    toast('已保存（'+(fields.length)+' 项，调度立即生效）','ok');
+    setTimeout(()=>location.reload(),900);
+  }catch(e){
+    toast('保存失败：'+e.message,'err');
+  }finally{
+    btn.disabled=false;
+  }
+});
 // 顶部状态胶囊必须反映真实连接状态。
 // 此前它只是一段静态 HTML（永远显示"连接中"），既不反映成功也不反映失败——
 // 一个只会说"正在连接"的指示灯，比没有更误导。

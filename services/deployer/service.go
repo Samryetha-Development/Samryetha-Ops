@@ -91,6 +91,11 @@ type Plan struct {
 	// 即使代码其实已经更新（这类不一致会让人误判系统状态）。
 	Marker string
 
+	// AutoDeploy 是**最终生效**的"自动部署"开关：deploy.yaml 的 schedule.enabled
+	// 与配置树里的 enabled.<id>（控制台设置表单）合并之后的值。
+	// 控制台用它回显开关状态——这里曾经写死 `return true`，于是无论实际如何都显示"开"。
+	AutoDeploy bool
+
 	Keep int
 }
 

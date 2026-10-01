@@ -133,15 +133,21 @@ func (s *Service) buildTopLevel(ctx context.Context, plans []Plan, schedule map[
 			},
 		)
 
-		// 设置区：调度与开关
+		// 设置区：调度与开关。
+		//
+		// 这些字段保存到配置树（config.set → var/config.json），装配层按同一个
+		// 优先级把它们合并进真正注册的调度：deploy.yaml 是默认值，控制台是覆盖。
+		// 注意 schedule 里**总是**带该目标（即使自动部署已关闭），
+		// 否则关掉开关后整个表单会消失、再也开不回来。
 		if cron, ok := schedule[p.ID]; ok {
 			sections = append(sections, map[string]any{
 				"kind": "form", "title": p.ID + " 调度", "order": 10 + i,
 				"fields": []map[string]any{
 					{"key": "schedule." + p.ID, "label": "cron", "type": "text", "value": cron,
-						"help": "5 段 cron，例如 */5 * * * *；留空表示不自动部署"},
+						"help": "5 段 cron，例如 */5 * * * *；保存后立即生效"},
 					{"key": "enabled." + p.ID, "label": "启用自动部署", "type": "bool",
-						"value": fmt.Sprint(p.enabled())},
+						"value": fmt.Sprint(p.AutoDeploy),
+						"help":  "关掉只停自动调度，不影响手动部署按钮"},
 				},
 			})
 		}
@@ -177,8 +183,6 @@ func (s *Service) targetState(ctx context.Context, p Plan) struct{ state string 
 	}
 	return out
 }
-
-func (p Plan) enabled() bool { return true }
 
 func trimNewline(s string) string {
 	for len(s) > 0 && (s[len(s)-1] == '\n' || s[len(s)-1] == '\r' || s[len(s)-1] == ' ') {

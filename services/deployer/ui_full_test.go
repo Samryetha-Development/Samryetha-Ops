@@ -182,3 +182,27 @@ func TestConfigNoticeEmptyWhenMissingOrEmptyObject(t *testing.T) {
 		t.Fatalf("空对象不应渲染成面板，实际 %q", got)
 	}
 }
+
+// 设置区的"启用自动部署"必须回显**最终生效值**。
+//
+// 回归背景：这里曾经是 `fmt.Sprint(p.enabled())`，而 `enabled()` 直接 `return true`——
+// 于是无论实际开关如何，界面永远显示"on"。
+func TestSettingsFormShowsEffectiveAutoDeploy(t *testing.T) {
+	s := New(&scriptedKernel{reply: map[string]map[string]any{}}, nil)
+	plans := []Plan{{ID: "main", AutoDeploy: false}}
+	_, _, sections := s.buildTopLevel(context.Background(), plans, map[string]string{"main": "*/5 * * * *"})
+
+	if len(sections) != 1 {
+		t.Fatalf("应有 1 个设置区，实际 %d", len(sections))
+	}
+	fields, _ := sections[0]["fields"].([]map[string]any)
+	if len(fields) != 2 {
+		t.Fatalf("应有 cron 与开关两个字段，实际 %#v", fields)
+	}
+	if got := fields[1]["value"]; got != "false" {
+		t.Fatalf("开关应回显生效值 false，实际 %#v", got)
+	}
+	if got := fields[0]["value"]; got != "*/5 * * * *" {
+		t.Fatalf("cron 字段应回显生效的 crontab，实际 %#v", got)
+	}
+}

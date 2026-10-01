@@ -93,7 +93,6 @@ func sourceOf(it kvLine) string {
 }
 
 // asNumber 把配置里的数值统一成 float64。
-//
 // 为什么需要：配置有两个来源，数字类型并不一致——deploy.yaml 走自带解析器，
 // 整数是 int；JSON 配置解出来是 float64。只断言其中一种，会让另一种来源里
 // 写下的配置**静默失效**（界面看不出任何异常，只是行为永远停在默认值）。
@@ -107,6 +106,38 @@ func asNumber(v any) (float64, bool) {
 		return n, true
 	}
 	return 0, false
+}
+
+// resolveSchedule 把"描述文件里的默认调度"与"配置树里的覆盖"合成最终值。
+//
+// get 就是 config.Tree.Get：控制台的设置表单把值写到 schedule.<id> / enabled.<id>，
+// 所以这两个键必须在这里被**真正读取**——否则表单就是摆设（改完什么都不发生）。
+// 返回的 bool 是"最终是否自动调度"：开关为关、或 cron 为空，都不调度。
+func resolveSchedule(def deploycfg.Schedule, get func(string) (any, bool)) (string, bool) {
+	cron := strings.TrimSpace(def.Cron)
+	enabled := def.Enabled
+	if v, ok := get("schedule." + def.Target); ok {
+		if s, ok := v.(string); ok && strings.TrimSpace(s) != "" {
+			cron = strings.TrimSpace(s)
+		}
+	}
+	if v, ok := get("enabled." + def.Target); ok {
+		enabled = truthy(v)
+	}
+	return cron, enabled && cron != ""
+}
+
+// truthy 解析布尔配置：控制台的表单存的是字符串 "true"/"false"，
+// 而 JSON 配置里可能是 bool。只认一种会让开关静默失效。
+func truthy(v any) bool {
+	switch b := v.(type) {
+	case bool:
+		return b
+	case string:
+		s := strings.TrimSpace(strings.ToLower(b))
+		return s == "true" || s == "1" || s == "on" || s == "yes"
+	}
+	return false
 }
 
 // 包级引用：renderShell 需要 shell/outcome，但它们是 main 的局部变量。
@@ -311,6 +342,58 @@ func startServices(root string, table syscall.Table, bus *events.Bus, klog *kern
 
 	// deployer：为每个 target 注册定时部署任务
 	dep := deployer.New(mkAdapter("deployer"), reg)
+
+	// 调度与"自动部署"开关的**最终值** = deploy.yaml 的默认值 + 配置树的覆盖。
+	//
+	// 配置树那一层就是控制台的设置表单（config.set → var/config.json，重启仍在）。
+	// 只认 deploy.yaml 的话，那个表单就是"改了没用"的摆设——本项目反复踩过的病。
+	scheduleOf := func(id string) (string, bool) {
+		def := deploycfg.Schedule{Target: id}
+		for _, sc := range cfg.Schedule {
+			if sc.Target == id {
+				def = sc
+				break
+			}
+		}
+		return resolveSchedule(def, wire.Config.Get)
+	}
+
+	var (
+		allPlans    []deployer.Plan
+		plansByID   = map[string]deployer.Plan{}
+		scheduleMap = map[string]string{}
+		jobIDs      = map[string]string{}
+	)
+
+	// scheduleTarget 按当前生效的 cron 注册任务；cron 非法或开关为关则不动。
+	scheduleTarget := func(id string) {
+		cron, on := scheduleOf(id)
+		if !on {
+			return
+		}
+		jobID, err := sdk.Cron(k, cron, "deploy:"+id, []sdk.Step{{
+			Name: "deploy." + id, Argv: []string{"true"},
+		}})
+		if err != nil {
+			klog.add("warn", "cron register failed for "+id+": "+err.Error()+"（检查控制台里的 cron 表达式）", nil)
+			return
+		}
+		plan := plansByID[id]
+		wire.Cron.SetHook("deploy:"+id, func() {
+			out := dep.Deploy(context.Background(), plan)
+			klog.add("info", fmt.Sprintf("scheduled deploy %s → %s", out.Target, out.State), nil)
+		})
+		jobIDs[id] = jobID
+		klog.add("info", fmt.Sprintf("scheduled %s (%s)", id, cron), nil)
+	}
+	unscheduleTarget := func(id string) {
+		if jobID, ok := jobIDs[id]; ok {
+			wire.Cron.Remove(jobID)
+			delete(jobIDs, id)
+			klog.add("info", "unscheduled "+id+" (自动部署已关闭)", nil)
+		}
+	}
+
 	for _, t := range cfg.Targets {
 		// 目标级开关必须真正生效：此前 deploycfg 只对 schedule 读 enabled，
 		// target 上的 enabled 被静默忽略（写了 false 也照跑）。停用的目标不注册
@@ -328,41 +411,65 @@ func startServices(root string, table syscall.Table, bus *events.Bus, klog *kern
 		case "exec":
 			reg.AddProcesses(processdriver.NewExec(k, t.Restart))
 		}
-		// 调度
-		for _, sc := range cfg.Schedule {
-			if sc.Target != t.ID || !sc.Enabled {
-				continue
-			}
-			plan := t
-			job := sc
-			_, err := sdk.Cron(k, job.Cron, "deploy:"+t.ID, []sdk.Step{{
-				Name: "deploy." + t.ID, Argv: []string{"true"},
-			}})
-			if err != nil {
-				klog.add("warn", "cron register failed for "+t.ID+": "+err.Error(), nil)
-				continue
-			}
-			// 真实部署由内核 cron 触发 → 调用 deployer.Deploy
-			wire.Cron.SetHook("deploy:"+t.ID, func() {
-				out := dep.Deploy(context.Background(), plan)
-				klog.add("info", fmt.Sprintf("scheduled deploy %s → %s", out.Target, out.State), nil)
-			})
-			klog.add("info", fmt.Sprintf("scheduled %s (%s)", t.ID, job.Cron), nil)
+		// 生效值写进计划：控制台用它回显"自动部署"开关。
+		cron, on := scheduleOf(t.ID)
+		t.AutoDeploy = on
+		allPlans = append(allPlans, t)
+		plansByID[t.ID] = t
+		// 即使开关是关的也带上 cron：否则设置表单会整块消失，用户再也开不回来。
+		if strings.TrimSpace(cron) != "" {
+			scheduleMap[t.ID] = cron
 		}
 	}
+
+	// 注册调度。每个目标的 job 名字固定为 deploy:<id>，以便配置变化时热替换。
+	for _, p := range allPlans {
+		scheduleTarget(p.ID)
+	}
+
+	// 控制台改了调度 → 立即重算并重声明面板，不必等 ui_refresh 或重启内核。
+	//
+	// 只认 deploy.yaml 的写法会让设置表单变成"改了没用"的摆设；这里让配置树的
+	// 覆盖值**真正生效**：改 cron 重新注册任务，改开关则注册或撤销。
+	unwatch := wire.Config.Watch(func(path string) {
+		id := ""
+		switch {
+		case strings.HasPrefix(path, "schedule."):
+			id = strings.TrimPrefix(path, "schedule.")
+		case strings.HasPrefix(path, "enabled."):
+			id = strings.TrimPrefix(path, "enabled.")
+		default:
+			return
+		}
+		if _, ok := plansByID[id]; !ok {
+			return
+		}
+		cron, on := scheduleOf(id)
+		unscheduleTarget(id)
+		if on {
+			scheduleTarget(id)
+		}
+		// UI 读的是 plansByID 与 scheduleMap，两个都要更新（值类型要回写切片元素）。
+		if p, ok := plansByID[id]; ok {
+			p.AutoDeploy = on
+			plansByID[id] = p
+			for i := range allPlans {
+				if allPlans[i].ID == id {
+					allPlans[i].AutoDeploy = on
+				}
+			}
+		}
+		if strings.TrimSpace(cron) != "" {
+			scheduleMap[id] = cron
+		}
+		klog.add("info", fmt.Sprintf("schedule for %s reloaded from config (cron=%q on=%v)", id, cron, on), nil)
+		// 后台重声明：别让保存请求等着一整套面板采集（进程/磁盘/提交）跑完。
+		go func() { _ = dep.DeclareFullUI(context.Background(), allPlans, scheduleMap) }()
+	})
+	_ = unwatch // 常驻进程生命周期，不需要注销
+
 	// 收集全部计划，供动作注册与 UI 声明使用。
 	// 停用的目标同样排除：否则控制台会出现"点了必然失败"的按钮，比没有按钮更误导。
-	var allPlans []deployer.Plan
-	for _, t := range cfg.Targets {
-		if !t.Enabled {
-			continue
-		}
-		allPlans = append(allPlans, t)
-	}
-	scheduleMap := map[string]string{}
-	for _, sc := range cfg.Schedule {
-		scheduleMap[sc.Target] = sc.Cron
-	}
 	if err := dep.RegisterActions(allPlans); err != nil {
 		log.Printf("deployer action register failed: %v", err)
 		klog.add("warn", "deployer action register failed: "+err.Error(), nil)
