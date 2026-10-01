@@ -213,11 +213,14 @@ textarea,input[type=text],input[type=password],input[type=number],select{
   <section class="card">
     <div class="card-h"><h2>日志</h2>
       <div style="display:flex;gap:8px">
-        <select id="log-src">{{range .}}<option value="{{.ID}}">{{.Label}}</option>{{end}}</select>
+        {{/* "全部" 由外壳提供：它才是日志端点的拥有者。默认选它，
+             否则首屏会停在一个恰好没有日志的来源（如 statuspage）上，
+             看上去像"日志功能坏了"。 */}}
+        <select id="log-src"><option value="">全部</option>{{range .}}<option value="{{.ID}}">{{.Label}}</option>{{end}}</select>
         <button class="btn" id="log-refresh">刷新</button>
       </div>
     </div>
-    <pre class="log" id="log-view">选择来源后加载…</pre>
+    <pre class="log" id="log-view">加载中…</pre>
   </section>
   {{end}}{{end}}
 
@@ -263,11 +266,15 @@ async function loadLog(){
   const r=await fetch('/api/kernel/log?source='+encodeURIComponent(src.value));
   const d=await r.json();
   const el=document.getElementById('log-view');
-  el.textContent=(d.items||[]).map(x=>x.msg).join('\n')||'(空)';
+  const items=(d.items||[]).map(x=>x.msg);
+  // 说清"空"是空在哪：内核日志环重启即清空，某个来源没有日志是正常的，
+  // 但只显示"(空)"会让人以为日志功能坏了。
+  el.textContent=items.join('\n')||'(该来源暂无日志；默认的"全部"会显示本次运行以来的所有条目，重启内核后会清空)';
   el.scrollTop=el.scrollHeight;
 }
 document.getElementById('log-refresh')?.addEventListener('click',loadLog);
 document.getElementById('log-src')?.addEventListener('change',loadLog);
+loadLog();   // 首屏就加载，别等用户先点一下
 // 顶部状态胶囊必须反映真实连接状态。
 // 此前它只是一段静态 HTML（永远显示"连接中"），既不反映成功也不反映失败——
 // 一个只会说"正在连接"的指示灯，比没有更误导。

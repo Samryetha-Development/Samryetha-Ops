@@ -54,42 +54,46 @@ func buildComponent(m map[string]any) ui.Component {
 		Label: str(m["label"], ""), Text: str(m["text"], ""), Value: str(m["value"], ""),
 		Tone: str(m["tone"], ""), Order: int(i64(m["order"], 0)),
 	}
-	if arr, ok := m["items"].([]any); ok {
-		for _, x := range arr {
-			if im, ok := x.(map[string]any); ok {
-				it := ui.Item{
-					Key: str(im["key"], ""), Label: str(im["label"], ""),
-					Value: str(im["value"], ""), Text: str(im["text"], ""),
-					At: i64(im["at"], 0), Tone: str(im["tone"], ""),
-					Confirm: str(im["confirm"], ""),
-				}
-				if am := toAnyMap(im["action"]); am != nil {
-					it.Action = &ui.Action{Kind: str(am["kind"], ""), Target: str(am["target"], ""),
-						Method: str(am["method"], ""), Confirm: str(am["confirm"], ""),
-						Body: str(am["body"], "")}
-					if it.Confirm == "" {
-						it.Confirm = it.Action.Confirm
-					}
-				}
-				c.Items = append(c.Items, it)
+	// items/fields/bars 一律用 toAnyList 而不是 `.([]any)` 断言。
+	//
+	// 为什么必须这样：内建服务（in-proc）传进来的切片是 Go 类型
+	// （`[]map[string]any`、`[]ui.Field`…），只有外部经 HTTP/JSON 才是 `[]any`。
+	// 直接断言的结果是**面板有标题、内容全空**——进程、磁盘与资源、最近提交、
+	// 设置里的表单块全都被这样吞掉过，而且不报任何错。
+	for _, x := range toAnyList(m["items"]) {
+		im := toAnyMap(x)
+		if im == nil {
+			continue
+		}
+		it := ui.Item{
+			Key: str(im["key"], ""), Label: str(im["label"], ""),
+			Value: str(im["value"], ""), Text: str(im["text"], ""),
+			At: i64(im["at"], 0), Tone: str(im["tone"], ""),
+			Confirm: str(im["confirm"], ""),
+		}
+		if am := toAnyMap(im["action"]); am != nil {
+			it.Action = &ui.Action{Kind: str(am["kind"], ""), Target: str(am["target"], ""),
+				Method: str(am["method"], ""), Confirm: str(am["confirm"], ""),
+				Body: str(am["body"], "")}
+			if it.Confirm == "" {
+				it.Confirm = it.Action.Confirm
 			}
 		}
+		c.Items = append(c.Items, it)
 	}
-	if arr, ok := m["fields"].([]any); ok {
-		for _, x := range arr {
-			if fm, ok := x.(map[string]any); ok {
-				c.Fields = append(c.Fields, ui.Field{
-					Key: str(fm["key"], ""), Label: str(fm["label"], ""),
-					Type: str(fm["type"], "text"), Value: str(fm["value"], ""),
-					Help: str(fm["help"], ""),
-				})
-			}
+	for _, x := range toAnyList(m["fields"]) {
+		fm := toAnyMap(x)
+		if fm == nil {
+			continue
 		}
+		c.Fields = append(c.Fields, ui.Field{
+			Key: str(fm["key"], ""), Label: str(fm["label"], ""),
+			Type: str(fm["type"], "text"), Value: str(fm["value"], ""),
+			Help: str(fm["help"], ""),
+		})
 	}
-	if arr, ok := m["bars"].([]any); ok {
-		for _, x := range arr {
-			c.Bars = append(c.Bars, float64(i64(x, 0)))
-		}
+	for _, x := range toAnyList(m["bars"]) {
+		c.Bars = append(c.Bars, float64(i64(x, 0)))
 	}
 	c.Confirm = str(m["confirm"], "")
 	if arr := toAnyList(m["columns"]); arr != nil {
@@ -106,7 +110,7 @@ func buildComponent(m map[string]any) ui.Component {
 			c.Rows = append(c.Rows, row)
 		}
 	}
-	if am, ok := m["action"].(map[string]any); ok {
+	if am := toAnyMap(m["action"]); am != nil {
 		c.Action = &ui.Action{Kind: str(am["kind"], ""), Target: str(am["target"], ""),
 			Method: str(am["method"], ""), Confirm: str(am["confirm"], ""), Body: str(am["body"], "")}
 		if c.Confirm == "" {
@@ -114,6 +118,24 @@ func buildComponent(m map[string]any) ui.Component {
 		}
 	}
 	return c
+}
+
+// buildNav 把导航声明统一成 NavItem，同样容忍 Go 类型与 JSON 两种形态
+// （内建服务传 []map[string]any，外部传 []any；只认后者会让导航项静默消失）。
+func buildNav(v any) []ui.NavItem {
+	var out []ui.NavItem
+	for _, x := range toAnyList(v) {
+		m := toAnyMap(x)
+		if m == nil {
+			continue
+		}
+		out = append(out, ui.NavItem{
+			ID: str(m["id"], ""), Label: str(m["label"], ""),
+			Icon: str(m["icon"], ""), Order: int(i64(m["order"], 0)),
+			Href: str(m["href"], ""),
+		})
+	}
+	return out
 }
 
 // Register 构建 syscall 表。
@@ -319,19 +341,7 @@ func Register(d Deps) Table {
 				" uses slots the shell does not render (they will never appear): "+
 				strings.Join(unknown, ", "), nil)
 		}
-		var nav []ui.NavItem
-		if arr, ok := c.Args["nav"].([]any); ok {
-			for _, x := range arr {
-				if m, ok := x.(map[string]any); ok {
-					nav = append(nav, ui.NavItem{
-						ID: str(m["id"], ""), Label: str(m["label"], ""),
-						Icon: str(m["icon"], ""), Order: int(i64(m["order"], 0)),
-						Href: str(m["href"], ""),
-					})
-				}
-			}
-		}
-		d.UI.Declare(&ui.Declaration{Source: c.Caller.Plugin, Slots: slots, Nav: nav})
+		d.UI.Declare(&ui.Declaration{Source: c.Caller.Plugin, Slots: slots, Nav: buildNav(c.Args["nav"])})
 		return map[string]any{}, nil
 	}
 	t["ui.withdraw"] = func(ctx context.Context, c Call) (map[string]any, *CallError) {

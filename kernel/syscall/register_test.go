@@ -81,6 +81,66 @@ func TestEventHistoryHandlerGivesMaps(t *testing.T) {
 	}
 }
 
+// 组件内的 items / fields / bars 必须容忍**内建服务的 Go 类型**。
+//
+// 回归背景：`buildComponent` 曾用 `m["items"].([]any)` 断言。外部经 HTTP/JSON
+// 传进来的确实是 []any，而内建服务传的是 []map[string]any——断言失败不报错，
+// 结果是**面板有标题、内容全空**：进程、磁盘与资源、最近提交、设置里的表单
+// 全都被这样吞掉。控制台上看起来"功能没做"，实际是数据被丢在解析这一步。
+func TestBuildComponentAcceptsGoTypedItemsAndFields(t *testing.T) {
+	decl := map[string]any{
+		"kind": "keyvalue", "title": "磁盘与资源",
+		// 内建服务就是这样传的：Go 的 []map[string]any，不是 []any
+		"items": []map[string]any{
+			{"label": "disk", "value": "42% 已用"},
+			{"label": "mem", "value": "31%", "tone": "ok"},
+		},
+		"fields": []map[string]any{
+			{"key": "schedule.main", "label": "cron", "type": "text", "value": "*/5 * * * *"},
+		},
+		"bars": []float64{1, 2, 3},
+	}
+	c := buildComponent(decl)
+	if len(c.Items) != 2 {
+		t.Fatalf("items 被丢掉了：%#v", c.Items)
+	}
+	if c.Items[0].Label != "disk" || c.Items[0].Value != "42% 已用" {
+		t.Fatalf("items 内容不对：%#v", c.Items[0])
+	}
+	if len(c.Fields) != 1 || c.Fields[0].Key != "schedule.main" {
+		t.Fatalf("fields 被丢掉了：%#v", c.Fields)
+	}
+	if len(c.Bars) != 3 {
+		t.Fatalf("bars 被丢掉了：%#v", c.Bars)
+	}
+}
+
+// 同时保留 JSON 形态（外部插件走 HTTP）：两种形态都必须能解析。
+func TestBuildComponentStillAcceptsJSONShapedItems(t *testing.T) {
+	decl := map[string]any{
+		"kind":  "list",
+		"items": []any{map[string]any{"label": "abc1234", "value": "fix something"}},
+	}
+	c := buildComponent(decl)
+	if len(c.Items) != 1 || c.Items[0].Label != "abc1234" {
+		t.Fatalf("JSON 形态的 items 解析失败：%#v", c.Items)
+	}
+}
+
+// 导航项同理：内建服务传 []map[string]any，只认 []any 会让导航静默消失。
+func TestBuildNavAcceptsGoTypedItems(t *testing.T) {
+	got := buildNav([]map[string]any{
+		{"id": "overview", "label": "概览", "order": 10},
+		{"id": "logs", "label": "日志", "order": 20},
+	})
+	if len(got) != 2 || got[0].ID != "overview" || got[1].Label != "日志" {
+		t.Fatalf("导航项被丢掉了：%#v", got)
+	}
+	if json := buildNav([]any{map[string]any{"id": "x"}}); len(json) != 1 {
+		t.Fatalf("JSON 形态的导航项解析失败：%#v", json)
+	}
+}
+
 // 文件列表同样必须在直调路径上给出 []any。
 //
 // 这是端到端烟雾测试抓到的真实缺陷：内核把 fsops 的 []string 原样返回，
