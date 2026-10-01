@@ -25,6 +25,17 @@ name: Build and release binaries
 on:
   push:
     branches: [main]
+    # 纯文档改动不发版。
+    #
+    # 为什么必须显式排除：每次 push 都会打 tag + 发 Release，而 Release 一旦出现，
+    # 服务器的自更新就会拉取并**重启生产内核**——一次没有任何代码变化的重启，
+    # 还会清空内核的内存事件流（审计面板随之变空）。改文档不该有这个副作用。
+    #
+    # 需要"改了代码但不发版"时，用提交首行的 !release-skip（见上方版本号规则）。
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
+      - "LICENSE"
   pull_request:
     paths:
       - "update-service/**"

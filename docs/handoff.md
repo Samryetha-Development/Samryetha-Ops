@@ -214,6 +214,7 @@ Lako 角色：`lako.admin`（服务账号 `admin` 持有）、`samryetha-users`�
 # 2) 检查（必须全绿，注意它会真的失败）
 bash scripts/check-all.sh
 # 3) 提交：首行含 [minor] → minor；[major] → major；其它 → patch
+#    纯文档/CI 琐事不想发版 → 首行带 !release-skip（见下）
 git commit -m "... [minor]"
 # 4) push main  → CI：两个 workflow（Kernel checks / Build and release binaries）
 #    CI 会：gofmt+vet+测试 → 交叉编译 update-service + kernel → 自动打 tag → 发 Release
@@ -223,9 +224,16 @@ git commit -m "... [minor]"
 ```
 
 - **Release 附件**：`update-service`、`kernel`（+ 各自 `.sha256`）。
-- **内核部署**：`/opt/Samryetha/kernel/scripts/kernel_self_update.sh [--status|--force]`
+- **内核部署**：`/opt/Samryetha/kernel/scripts/kernel_self_update.sh [--status|--force|--set-interval N]`
   （下载 → sha256 → **安装前预检** → 备份 → 原子替换 → 重启 → 健康门 → 回滚 → 标记）。
 - **服务器没有 Go**，也没有内核源码；只有 Release 附件 + `kernel/scripts/`。
+
+⚠️ **发版的代价比你想的大**：每次 push 打 tag、发 Release，而 Release 一出现，
+服务器的自更新就会**拉取并重启生产内核**——哪怕这次改动只是改文档。
+所以纯文档提交要么走 `paths-ignore`（已配：`docs/**`、`**/*.md`、`LICENSE` 不触发发布），
+要么在**首行**写 `!release-skip`（判定只看最后一条提交的首行，见
+`.github/workflows/build-update-service.yml` 的版本号规则）。
+这个 token 早就实现了，但文档里一直没写——**先 grep 现成机制，再想新招**。
 
 ---
 
