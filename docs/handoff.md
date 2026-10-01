@@ -133,6 +133,7 @@ ops_self_update.sh             旧控制台自更新（其组件已退役）
 | commit | 内容 |
 |---|---|
 | `ae82f76` | 修 syscall **返回值形态**（`event.history` / `fs.list`）：内建服务按 JSON 形态解析、内核却返回原始 Go 值，断言静默失败 → 目标状态永远 `unknown`、回滚找不到上一版、备份面板永远空。**外加**：接线从未赋值的 `log.query`；内核自身日志的来源口径（`kernel`）；`logs.sources` 里写错的 id（`deployment`→`deployer`）；`ui_refresh_seconds` 的 int/float64 类型错配；面板路径改用 `managed_root` 派生的范围（`logs:` / `status:`）；"操作审计"改读事件历史（原来 tail 的是一个 4 天没更新的旧日志，展示退役 `ops` 的陈年输出）。见 §8.B |
+| `2720999` | 备份**目录**形态（线上真实形态，本地夹具曾用 `touch` 造文件 → 假绿）+ `--set-interval` 自更新间隔开关（§6.6）+ §6.5 夹具改为目录 |
 
 **这一轮的教训（比改动本身重要）**：上面这些缺陷**单测全绿**也照样存在——
 它们只有在真进程里才暴露。所以改完请按 §6.5 起一次真内核；新增的每个回归测试
@@ -140,6 +141,28 @@ ops_self_update.sh             旧控制台自更新（其组件已退役）
 
 **这一轮的改动尚未上线**（见 §8.A.9）：内核二进制要经 push → CI → Release → 自更新才生效。
 在那之前，服务器控制台上的"操作审计"仍然显示旧日志。
+
+### 3.2 v1.4.2 上线与线上验收（含一个只在线下才暴露的缺陷）
+
+`ae82f76` / `469f4f3` 推送后 CI 全绿，自动打 `v1.4.2` 并发 Release。
+服务器 `kernel_self_update.sh` 一次通过：下载校验 → 预检 → 替换 → 重启 → 健康门，
+标记 `v1.4.2`，`NRestarts=0`。
+
+线上验收结果（自签会话，方法见 §6.2）：
+
+| 检查项 | 修复前 | 修复后 |
+|---|---|---|
+| `update.log` 里的退役 ops 输出残留在控制台 | 有（4 天前的陈年数据） | **0 处** ✓ |
+| `/api/kernel/log?source=kernel` | **恒为 0 条** | 15 条 ✓ |
+| `/api/kernel/log?source=deployer` | 1 条 | 1 条 ✓ |
+| 数据库备份面板 | 空 | **仍然空** ✗ → 见下 |
+
+**备份面板为什么还是空**：线上备份是**目录**（`fs.list` 返回 `db-backup-20260903-201503/`），
+而那段代码把带 `/` 的条目当"不是备份"过滤掉了。我的本地烟雾测试用的是 `touch` 出来的
+**文件**，所以永远测不出来——**夹具比线上更规整 = 假绿**。已修（`2720999`，夹具改为目录），
+并把配方 §6.5 的 `touch` 改成 `mkdir`。
+
+同一轮加了 `--set-interval` 调试开关，见 §6.6。
 
 ---
 
@@ -264,7 +287,8 @@ deployer: {ui_refresh_seconds: 1}     # 面板重声明间隔，便于马上看�
 YAML
 echo '{"mode":"header"}' > $W/root/etc/auth.json   # header 模式只允许 loopback 监听
 echo 'smoke-admin = admin' > $W/root/etc/policy.txt
-touch $W/managed/logs/db-backup-20260930-030000.sql.gz
+# 夹具必须与线上形态一致：线上备份是**目录**，不是文件！
+mkdir -p $W/managed/logs/db-backup-20260930-030000
 echo '{"level":"warn"}' > $W/managed/status/data/config-notice.json
 
 # 2) 起来，用请求头自称身份（header 模式）
@@ -279,6 +303,28 @@ curl -s http://127.0.0.1:3097/update -H "$H" | grep -oE '<h2>[^<]*'
 
 看到「数据库备份 / 操作审计 / 配置提醒」三块内容非空，说明面板采集链路是通的。
 **注意 `targets` 一定要 `enabled: false`**，否则内核 cron 会真的去部署 `/opt/Samryetha`。
+
+**为什么夹具必须照抄线上形态**：第一版配方用 `touch` 造了**文件**形态的备份，
+于是本地全绿——而线上是真**目录**，面板在服务器上照样空白（见 §3.2）。
+凡是"夹具比线上更规整"的地方，都是在给自己制造假绿。
+
+### 6.6 内核自更新的间隔开关（调试用）
+
+间隔原本写死在 systemd 单元里（`OnCalendar=*:0/15`），调试时只能干等。现在：
+
+```bash
+S=/opt/Samryetha/kernel/scripts/kernel_self_update.sh
+sudo $S --status            # 顺带显示当前生效间隔
+sudo $S --set-interval 2    # 改成每 2 分钟（写 drop-in，不动单元本体）
+sudo $S --unset-interval    # 恢复单元自带的 15 分钟
+sudo systemctl start samryetha-kernel-update.service   # 或者：根本不等，立刻更新一次
+```
+
+- 间隔 < 5 分钟会警告：每次检查都调 GitHub API（未鉴权 60 次/小时/IP）。
+- `drop-in` 在 `/etc/systemd/system/samryetha-kernel-update.timer.d/interval.conf`，
+  卸掉它即可回到默认；内核二进制更新不会动它。
+- **这个开关目前只在仓库里**：服务器上那份 `kernel/scripts/kernel_self_update.sh`
+  要手工同步才有（§8.A.2 的通道问题）。
 
 ---
 
@@ -333,8 +379,11 @@ curl -s http://127.0.0.1:3097/update -H "$H" | grep -oE '<h2>[^<]*'
 8. **`config.list` 返回的 `items` 是 map 不是 list**（`kernel/syscall/register_ext.go`），
    与调用名和文档描述都不符；目前无消费者，属于"埋着的雷"。
 9. **本轮改动还没有上线**：内核二进制（deployer 服务也在内核进程里）要经
-   push → CI → Release → `kernel_self_update.sh` 才会生效。在那之前，服务器上的控制台
-   仍然是旧行为（"操作审计"显示 2026-09-26 的陈年 ops 输出）。
+   push → CI → Release → `kernel_self_update.sh` 才会生效。（`ae82f76` 已随 `v1.4.2`
+   上线并验收，见 §3.2；`2720999` 的目录修复需要下一个 Release。）
+10. **`kernel/scripts/*.sh` 与 `etc/` 都没有自动同步通道**（与 §8.A.2 同源）：
+   本轮加的 `--set-interval` 只在仓库里，服务器那份脚本要手工同步才会出现。
+   在那之前，间隔仍可用 systemd drop-in 直接表达（见 §6.6）。
 
 ### 8.B 本轮已修（原 §8.4 / §8.5）
 
@@ -363,6 +412,7 @@ curl -s http://127.0.0.1:3097/update -H "$H" | grep -oE '<h2>[^<]*'
 | 直接改服务器文件 | 除非是 `etc/` 配置（目前无自动通道），否则一律走"改代码 → 推 dev/main → 让更新器部署" |
 | **syscall 的返回值也有两种形态** | 入参要容忍 map 与原始 Go 类型（早有辅助），**返回值同样要统一**：内建服务拿到的是 `[]string` / `events.Envelope`，按 `[]any` / `map[string]any` 断言会**静默给出零值**。两个真实后果：每个目标状态永远 `unknown`、备份面板永远空白。见 `docs/architecture.md` §4.2 |
 | **只跑单测就以为改对了** | 本轮三个缺陷（`fs.list` 返回类型、`ui_refresh_seconds` 的 int/float64 错配、事件形态）在单测全绿的情况下依然存在，是**本地起真内核**跑出来的。§6.5 给了 20 行可复制的复现脚本 |
+| **夹具比线上更规整** | 线上备份是**目录**，我的烟雾夹具却用 `touch` 造**文件**：本地全绿、线上面板空白。**夹具要照抄线上形态**（§3.2） |
 | **配置数值的类型取决于来源** | `deploy.yaml` 经自带解析器 → `int`；JSON 配置 → `float64`。只断言一种，另一种来源里写的值就**静默失效**（`ui_refresh_seconds: 1` 因此永远停在 60s 默认值）。取值统一走 `asNumber` |
 
 ---
@@ -372,6 +422,8 @@ curl -s http://127.0.0.1:3097/update -H "$H" | grep -oE '<h2>[^<]*'
 1. **先确认工具与真实状态**，不要相信"编译通过/日志显示成功"。§2.4 的核验表可以照抄一遍。
 2. **要 push 先跟人说**（本机到 github 需要他开代理），其余工作不用等。
 3. 从 §8.A 的 2 → 3 → 5 开始；每改一处都跑 `check-all.sh`，并按 §6.5 **起一次真内核**看面板。
+   上线后再对着**线上真实数据**核一遍（§3.2 就是这么抓到"目录 vs 文件"的）——
+   本地夹具只能证明代码自洽，证明不了它匹配现实。
 4. 凡是"看起来配置了但可能没人读"的东西，先 `grep` 确认有没有读取方——本轮又抓到两组
    （`secrets:` / `notify:`）。**加配置项时同时写读取代码**，并让"配置了却不生效"变成失败或告警。
 5. 改内核行为前，先确认**服务器上的配置**已经与代码期望一致（否则会出现上一轮的顺序事故）。
