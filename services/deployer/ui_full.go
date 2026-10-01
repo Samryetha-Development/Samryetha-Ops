@@ -323,12 +323,17 @@ func (s *Service) backupList(ctx context.Context) []backup {
 //
 // 按名字排序就够，是因为备份名自带 db-backup-YYYYmmdd-HHMMSS 时间戳，
 // 字典序与时间序一致——为此再 stat 一遍每个文件是多余的系统调用。
+//
+// 目录与文件都算：线上实际的备份是**目录**（`fs.list` 给出的条目带结尾斜杠）。
+// 早期版本只认文件、把带 `/` 的条目过滤掉，面板于是空白——而当时的测试夹具用的是
+// `touch` 出来的**文件**，于是本地全绿、线上全空。夹具必须与线上形态一致。
 func pickBackups(names []string, n int) []backup {
 	picked := make([]string, 0, len(names))
 	for _, name := range names {
-		if strings.HasPrefix(name, backupNamePrefix) && !strings.HasSuffix(name, "/") {
-			picked = append(picked, name)
+		if !strings.HasPrefix(name, backupNamePrefix) {
+			continue
 		}
+		picked = append(picked, strings.TrimSuffix(name, "/"))
 	}
 	sort.Sort(sort.Reverse(sort.StringSlice(picked)))
 	if n > 0 && len(picked) > n {
@@ -341,7 +346,7 @@ func pickBackups(names []string, n int) []backup {
 	return out
 }
 
-// backupNamePrefix 是备份步骤产出的文件前缀。
+// backupNamePrefix 是备份步骤产出的名字前缀（线上是目录，本地测试可能是文件）。
 const backupNamePrefix = "db-backup-"
 
 // backupTime 从备份名里解出时间；名字不符合约定时返回空串——

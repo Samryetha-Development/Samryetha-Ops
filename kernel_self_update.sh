@@ -12,9 +12,15 @@
 #   并强制"安装前预检"，因为内核一旦起不来，控制台就没了，连救都难。
 #
 # 用法：
-#   kernel_self_update.sh            # 检查并更新
-#   kernel_self_update.sh --force    # 忽略版本标记，强制重装
-#   kernel_self_update.sh --status   # 只看状态
+#   kernel_self_update.sh                  # 检查并更新
+#   kernel_self_update.sh --force          # 忽略版本标记，强制重装
+#   kernel_self_update.sh --status         # 只看状态
+#   kernel_self_update.sh --set-interval N # 调试开关：把自更新间隔改成每 N 分钟
+#   kernel_self_update.sh --unset-interval # 恢复单元自带的间隔（15 分钟）
+#
+# 为什么需要 --set-interval：间隔写死在 systemd 单元里（OnCalendar=*:0/15），
+# 于是"想让某个改动几分钟内落地"只能干等，或者手工编辑单元文件（本项目禁止的做法）。
+# 这里用 systemd drop-in 表达覆盖，不改单元本体、可一条命令撤回。
 set -uo pipefail
 
 ROOT="${KERNEL_ROOT:-/opt/Samryetha/kernel}"
@@ -24,6 +30,8 @@ LOG_DIR="/opt/Samryetha/logs"
 LOG_FILE="$LOG_DIR/kernel-update.log"
 MARKER="$LOG_DIR/.last-deployed-kernel"
 SVC="samryetha-kernel"
+TIMER_UNIT="samryetha-kernel-update.timer"
+DROPIN_DIR="/etc/systemd/system/${TIMER_UNIT}.d"
 BIN="$ROOT/bin/kernel"
 HEALTH_URL="${KERNEL_HEALTH_URL:-http://127.0.0.1:3040/healthz}"
 PREFLIGHT_PORT="${KERNEL_PREFLIGHT_PORT:-3099}"
@@ -44,6 +52,21 @@ try: print(json.load(sys.stdin).get("tag_name",""))
 except Exception: print("")' 2>/dev/null
 }
 
+# ---------- 调试开关：自更新间隔 ----------
+#
+# 单元自带 `OnCalendar=*:0/15`。drop-in 里先把它清空，再改用
+# OnBootSec + OnUnitActiveSec，好处是**任意分钟数都成立**
+# （OnCalendar 的 */N 只在 N 整除 60 时才是"每 N 分钟"）。
+timer_interval() {
+  local f="$DROPIN_DIR/interval.conf"
+  if [ -f "$f" ]; then
+    local n
+    n=$(grep -oE '^OnUnitActiveSec=[0-9]+' "$f" 2>/dev/null | head -1 | cut -d= -f2)
+    [ -n "$n" ] && { echo "每 ${n} 分钟（drop-in）"; return; }
+  fi
+  echo "每 15 分钟（单元自带）"
+}
+
 if [ "${1:-}" = "--status" ]; then
   REL="$(latest_tag)"
   LAST=""; [ -f "$MARKER" ] && LAST=$(cat "$MARKER")
@@ -52,8 +75,52 @@ if [ "${1:-}" = "--status" ]; then
   if [ -n "$REL" ] && [ "$REL" != "$LAST" ]; then echo "=> 有可用更新"; else echo "=> 已是最新"; fi
   echo "服务: $(systemctl is-active "$SVC" 2>/dev/null || echo unknown)"
   echo "运行二进制: $(sha256sum "$BIN" 2>/dev/null | cut -c1-16)…"
+  echo "自更新间隔: $(timer_interval)"
   exit 0
 fi
+
+set_interval() {
+  local n="${1:-}"
+  case "$n" in
+    ''|*[!0-9]*) fail "间隔必须是正整数分钟（收到：${n:-空}）"; return 1 ;;
+  esac
+  [ "$n" -lt 1 ] && { fail "间隔至少 1 分钟"; return 1; }
+  if [ "$n" -lt 5 ]; then
+    log "[warn] 间隔 ${n} 分钟会成倍增加 GitHub API 调用（未鉴权限 60 次/小时/IP），仅建议临时调试"
+  fi
+  sudo -n mkdir -p "$DROPIN_DIR" || { fail "无法创建 $DROPIN_DIR（需要免密 sudo）"; return 1; }
+  printf '%s\n' \
+    "# 由 kernel_self_update.sh --set-interval 生成，请勿手改。" \
+    "# 撤回：kernel_self_update.sh --unset-interval" \
+    "[Timer]" \
+    "# 清空单元自带的 OnCalendar，改按“上次运行后 N 分钟”触发" \
+    "OnCalendar=" \
+    "OnBootSec=${n}min" \
+    "OnUnitActiveSec=${n}min" \
+    | sudo -n tee "$DROPIN_DIR/interval.conf" >/dev/null || { fail "写入 drop-in 失败"; return 1; }
+  sudo -n systemctl daemon-reload && sudo -n systemctl restart "$TIMER_UNIT" || { fail "重载 timer 失败"; return 1; }
+  log "[ok] 自更新间隔已设为每 ${n} 分钟（drop-in 覆盖，未改单元本体）"
+  systemctl list-timers "$TIMER_UNIT" --no-pager | sed -n '2p'
+  return 0
+}
+
+unset_interval() {
+  if [ -f "$DROPIN_DIR/interval.conf" ]; then
+    sudo -n rm -f "$DROPIN_DIR/interval.conf"
+    sudo -n rmdir "$DROPIN_DIR" 2>/dev/null
+    sudo -n systemctl daemon-reload && sudo -n systemctl restart "$TIMER_UNIT" || { fail "重载 timer 失败"; return 1; }
+    log "[ok] 已恢复单元自带间隔（每 15 分钟）"
+  else
+    log "[ok] 本就没有自定义间隔（单元自带 15 分钟）"
+  fi
+  systemctl list-timers "$TIMER_UNIT" --no-pager | sed -n '2p'
+  return 0
+}
+
+case "${1:-}" in
+  --set-interval)   set_interval "${2:-}"; exit $? ;;
+  --unset-interval) unset_interval; exit $? ;;
+esac
 
 # ---------- 版本判定（以 Release tag 为准）----------
 log "==> 检查内核更新"

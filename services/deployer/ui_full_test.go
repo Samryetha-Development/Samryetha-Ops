@@ -47,26 +47,40 @@ func (k *scriptedKernel) called(name string) bool {
 
 // 备份列表改成走内核登记的 logs: 范围：既不再写死 /opt/Samryetha，
 // 也把"过滤 + 倒序 + 截断"这段纯逻辑拎出来单独可测。
+//
+// 夹具刻意混入**目录**形态（带结尾斜杠）：线上真正的备份是目录，
+// 早期只认文件导致线上面板空白、本地却全绿。
 func TestPickBackupsFiltersSortsNewestFirstAndCaps(t *testing.T) {
 	names := []string{
 		"db-backup-20260901-030000.sql.gz",
-		"db-backup-20260930-030000.sql.gz",
+		"db-backup-20260930-030000/",
 		"update.log",
-		"db-backup-20260915-030000.sql.gz",
+		"db-backup-20260915-030000/",
 		"nested/",
 	}
 	got := pickBackups(names, 2)
 	if len(got) != 2 {
 		t.Fatalf("应截断到 2 条，实际 %d 条：%#v", len(got), got)
 	}
-	if got[0].name != "db-backup-20260930-030000.sql.gz" {
-		t.Fatalf("最新的备份应排第一，实际 %q", got[0].name)
+	if got[0].name != "db-backup-20260930-030000" {
+		t.Fatalf("最新的备份应排第一（且去掉目录斜杠），实际 %q", got[0].name)
 	}
-	if got[1].name != "db-backup-20260915-030000.sql.gz" {
+	if got[1].name != "db-backup-20260915-030000" {
 		t.Fatalf("第二条应是次新的备份，实际 %q", got[1].name)
 	}
 	if got[0].when != "2026-09-30 03:00:00" {
-		t.Fatalf("时间应从文件名解出，实际 %q", got[0].when)
+		t.Fatalf("时间应从名字解出，实际 %q", got[0].when)
+	}
+}
+
+// 回归：目录形态的备份必须被列出（这是线上真实形态）。
+func TestPickBackupsIncludesDirectoryEntries(t *testing.T) {
+	got := pickBackups([]string{"db-backup-20260903-201503/"}, 10)
+	if len(got) != 1 || got[0].name != "db-backup-20260903-201503" {
+		t.Fatalf("目录形态的备份应被列出且不带斜杠，实际 %#v", got)
+	}
+	if got[0].when != "2026-09-03 20:15:03" {
+		t.Fatalf("时间应能解出，实际 %q", got[0].when)
 	}
 }
 
