@@ -187,7 +187,12 @@ textarea,input[type=text],input[type=password],input[type=number],select{
 
   {{with index .Slots "settings.sections"}}{{if nonempty .}}
   <section class="card">
-    <div class="card-h"><h2>设置</h2><button class="btn" id="settings-save">保存</button></div>
+    <div class="card-h"><h2>设置</h2>
+      <div style="display:flex;gap:8px">
+        <button class="btn" id="settings-reset">恢复默认</button>
+        <button class="btn" id="settings-save">保存</button>
+      </div>
+    </div>
     {{range .}}
       <h3 style="font-size:13px;margin:14px 0 10px">{{.Title}}</h3>
       {{range .Fields}}
@@ -295,6 +300,30 @@ document.getElementById('settings-save')?.addEventListener('click', async ()=>{
     setTimeout(()=>location.reload(),900);
   }catch(e){
     toast('保存失败：'+e.message,'err');
+  }finally{
+    btn.disabled=false;
+  }
+});
+
+// "恢复默认"：删掉这些字段的运行时覆盖值，回落到 deploy.yaml / etc/config.json。
+//
+// 为什么必须有这个按钮：保存会把值写进配置树，而**优先级高于 deploy.yaml**。
+// 没有撤销入口时，用户在界面上改一次就再也回不到"跟随描述文件"，
+// 而且他根本不知道覆盖值存在（得去翻 var/config.json）。
+document.getElementById('settings-reset')?.addEventListener('click', async ()=>{
+  const btn=document.getElementById('settings-reset');
+  const fields=[...document.querySelectorAll('[data-field]')];
+  if(!fields.length) return;
+  if(!confirm('把这 '+fields.length+' 项恢复成描述文件里的默认值？\n控制台保存的覆盖值会被删除。')) return;
+  btn.disabled=true;
+  try{
+    for(const f of fields){
+      await kernelCall('config.unset',{path:f.dataset.field});
+    }
+    toast('已恢复默认','ok');
+    setTimeout(()=>location.reload(),900);
+  }catch(e){
+    toast('恢复失败：'+e.message,'err');
   }finally{
     btn.disabled=false;
   }

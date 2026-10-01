@@ -111,6 +111,25 @@ func (t *Tree) Set(root, path string, val any) error {
 	return nil
 }
 
+// Unset 删除运行时覆盖层里的键，并落盘 + 通知。
+//
+// 与 Set 对称：删掉覆盖值之后 Get 会回落到下一层来源（etc/config.json、
+// deploy.yaml 里的默认值）。控制台的"恢复默认"靠的就是它——
+// 没有这个操作时，一旦保存过就再也回不到"跟随描述文件"的状态。
+func (t *Tree) Unset(root, path string) error {
+	if strings.TrimSpace(path) == "" {
+		return fmt.Errorf("path required")
+	}
+	t.mu.Lock()
+	unsetPath(t.data, strings.Split(path, "."))
+	t.mu.Unlock()
+	if err := t.flush(root); err != nil {
+		return err
+	}
+	t.notify(path)
+	return nil
+}
+
 // Watch 订阅变更（返回取消函数）。
 func (t *Tree) Watch(fn func(path string)) func() {
 	t.mu.Lock()
@@ -212,4 +231,26 @@ func setPath(m map[string]any, keys []string, val any) {
 		m = nxt
 	}
 	m[keys[len(keys)-1]] = val
+}
+
+// unsetPath 删除叶子键，并顺手清掉因此变空的父映射。
+//
+// 为什么要清父级：否则 var/config.json 里会残留一串空 `{}`，
+// 看起来像"还有配置在那里"，下一个人（或下一个 AI）会先去查它。
+func unsetPath(m map[string]any, keys []string) {
+	if len(keys) == 0 {
+		return
+	}
+	if len(keys) == 1 {
+		delete(m, keys[0])
+		return
+	}
+	child, ok := m[keys[0]].(map[string]any)
+	if !ok {
+		return
+	}
+	unsetPath(child, keys[1:])
+	if len(child) == 0 {
+		delete(m, keys[0])
+	}
 }

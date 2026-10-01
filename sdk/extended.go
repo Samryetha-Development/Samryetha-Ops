@@ -148,6 +148,12 @@ func ConfigSet(k Kernel, path string, val any) error {
 	return err
 }
 
+// ConfigUnset 删除运行时覆盖值（回落到下一层来源：etc/config.json、deploy.yaml 默认值）。
+func ConfigUnset(k Kernel, path string) error {
+	_, err := call(k, "config.unset", map[string]any{"path": path})
+	return err
+}
+
 func stringify(v any) string {
 	switch x := v.(type) {
 	case string:

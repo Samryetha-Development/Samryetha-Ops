@@ -51,6 +51,29 @@ func registerConfig(t Table, d Deps) {
 		}
 		return map[string]any{}, nil
 	}
+	// config.unset 删除运行时覆盖值（控制台的"恢复默认"）。
+	//
+	// 为什么必须有：只有 set 没有 unset 时，"保存过一次"就无法回到跟随描述文件的状态——
+	// 覆盖值会永久压过 deploy.yaml，而用户根本不知道该怎么撤销。
+	t["config.unset"] = func(ctx context.Context, c Call) (map[string]any, *CallError) {
+		if e := allow(d, c, c.Args); e != nil {
+			return nil, e
+		}
+		if d.Config == nil {
+			return nil, &CallError{Code: "unavailable", Message: "config not wired"}
+		}
+		path := str(c.Args["path"], "")
+		if strings.TrimSpace(path) == "" {
+			return nil, &CallError{Code: "invalid_args", Message: "path required"}
+		}
+		if isSecretPath(path) {
+			return nil, &CallError{Code: "denied", Message: "secret paths are not writable via config.unset"}
+		}
+		if err := d.Config.Unset(d.Root, path); err != nil {
+			return nil, &CallError{Code: "internal", Message: err.Error()}
+		}
+		return map[string]any{}, nil
+	}
 	t["config.list"] = func(ctx context.Context, c Call) (map[string]any, *CallError) {
 		if e := allow(d, c, c.Args); e != nil {
 			return nil, e

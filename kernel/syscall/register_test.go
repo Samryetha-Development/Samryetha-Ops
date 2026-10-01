@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"samryetha/kernel/config"
 	"samryetha/kernel/events"
 	"samryetha/kernel/fsops"
 	"samryetha/kernel/perm"
@@ -176,5 +177,51 @@ func TestFsListReturnsAnySliceOnDirectCallPath(t *testing.T) {
 	}
 	if len(items) != 1 || items[0] != "a.log" {
 		t.Fatalf("列目录结果不对：%#v", items)
+	}
+}
+
+// config.unset 是"恢复默认"的后端：删掉覆盖值，让调用方回落到描述文件的默认值。
+// 同时它必须守住两道门：能力点（config.write）与密钥路径（永不接受写入/删除）。
+func TestConfigUnsetRemovesOverrideAndEnforcesGuards(t *testing.T) {
+	root := t.TempDir()
+	tree, err := config.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tree.Set(root, "switch.main", "false"); err != nil {
+		t.Fatal(err)
+	}
+
+	policy := perm.DefaultPolicy()
+	policy.Assign["test:op"] = perm.RoleOperator
+	policy.Assign["test:viewer"] = perm.RoleViewer
+	table := Register(Deps{Config: tree, Policy: policy, Root: root})
+
+	unset := func(subject, path string) *CallError {
+		_, cerr := table["config.unset"](context.Background(), Call{
+			Name: "config.unset", Args: map[string]any{"path": path},
+			Caller: CallerInfo{Plugin: "t", Subject: subject},
+		})
+		return cerr
+	}
+
+	// viewer 只有 config.read，必须被拒
+	if cerr := unset("test:viewer", "switch.main"); cerr == nil || cerr.Code != "denied" {
+		t.Fatalf("viewer 不该能删除覆盖值，实际 %v", cerr)
+	}
+	// 密钥路径必须被拒（与 config.set 一致）
+	if cerr := unset("test:op", "secrets/webhook"); cerr == nil || cerr.Code != "denied" {
+		t.Fatalf("密钥路径应被拒绝，实际 %v", cerr)
+	}
+	// 空路径必须报参数错误，而不是删掉整棵树
+	if cerr := unset("test:op", " "); cerr == nil || cerr.Code != "invalid_args" {
+		t.Fatalf("空路径应报 invalid_args，实际 %v", cerr)
+	}
+	// 正常路径：删除成功，且树里确实没了
+	if cerr := unset("test:op", "switch.main"); cerr != nil {
+		t.Fatalf("operator 应能删除覆盖值，实际 %v", cerr)
+	}
+	if _, ok := tree.Get("switch.main"); ok {
+		t.Fatal("覆盖值应已从配置树删除")
 	}
 }

@@ -67,6 +67,7 @@ var CallPermissions = map[string]Permission{
 	"fs.list":         "fs.read",
 	"config.get":      "config.read",
 	"config.set":      "config.write",
+	"config.unset":    "config.write",
 	"config.list":     "config.read",
 	"config.watch":    "config.read",
 	"auth.public":     "", // 取当前主体的公开信息
