@@ -1170,7 +1170,6 @@ body {{ background:var(--bg); color:var(--text); font-family:system-ui,-apple-sy
 .brand {{ font-size:16px; font-weight:700; }}
 .top-r {{ display:flex; gap:8px; align-items:center; }}
 .themebtn {{ background:none; border:1px solid var(--border); border-radius:8px; padding:4px 9px; cursor:pointer; font-size:13px; color:var(--text); }}
-  border:1px solid var(--border); background:var(--panel); border-radius:8px; padding:4px 10px; font-size:12px; }}
 .dd {{ position:relative; }}
 .ddbtn {{ background:var(--panel); border:1px solid var(--border); color:var(--text); border-radius:8px; padding:4px 10px; cursor:pointer; font-size:12px; }}
 .ddbtn .globe {{ margin-right:5px; }}
