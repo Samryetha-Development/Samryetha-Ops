@@ -303,7 +303,41 @@ ops_self_update.sh             旧控制台自更新（其组件已退役）
 
 **顺带发现**：`restart:` 段（那两行 `pm2 reload …`）其实是**死配置**——只要配了
 `processes.driver`，部署走的就是驱动的 `Reload`，`else` 分支里的 `restart:` 永不执行
-（main 与 dev 都是如此，容易让人误以为"重启靠那两行"）。
+（main 与 dev 都是如此）。而驱动路径当时正踩着一个更严重的 bug，见下一节。
+
+### 3.6 生产事故：部署 main 却在重启 dev 的进程（"配置串台"）
+
+**症状**：主站（`samryetha-backend` / `samryetha-frontend`）的进程自 2026-10-04 18:52
+起**连续 18 小时没被重启过**，而部署每 5 分钟"成功"一次、标记也一直在写。
+另一头 dev 的进程每轮都被重启（`dev-backend` restarts=2495、`dev-frontend` **4932 ≈ 2×**）。
+
+**根因**：`Registry.AddProcesses(d)` 用 `d.Name()` 当键，而 PM2 驱动的 `Name()` 恒为
+`"pm2"`。装配层在每个目标上各注册一次：
+
+```
+main: NewPM2(k, [samryetha-backend, samryetha-frontend])       ← 先注册
+dev : NewPM2(k, [samryetha-dev-backend, samryetha-dev-frontend]) ← 覆盖掉它
+```
+
+于是部署服务里 `Reg.Processes("pm2")` 拿到的**永远是 dev 那个**：
+- 部署 dev → reload dev 的进程 ✓（看起来一切正常）
+- 部署 main → **也 reload dev 的进程** ✗（main 的进程永远不动）
+- 每个 tick 有 main、dev 两次部署，各 reload 一次 dev-frontend → 2 倍关系对上了。
+
+**后果**：主站代码每 5 分钟被 `git reset` + 构建到磁盘，但进程从不重启 →
+线上跑的是 18 小时前的代码，而所有看板都显示"部署成功"。
+
+**修法**：驱动变成**无状态**，进程名由调用方按目标传入（`drivers.ProcessRef`）：
+`Reload/Restart/Stop/Status(cx, ref)`，装配层只注册驱动类型、不再携带目标参数。
+这样"重启错目标"在结构上不可能发生。
+
+**回归测试**：`TestRestartUsesEachTargetsOwnProcessNames` 用记录型驱动跑两个目标，
+断言各自收到自己的进程名；把 `procRef` 改回"固定返回 main 的进程名"（模拟旧行为）
+测试立刻变红 ✓。
+
+**教训**：**按名字注册的全局表 + 每个目标不同的数据 = 静默串台**。
+凡是"每个目标/租户各有一份配置"的东西，要么按目标键存放，要么在调用时传入——
+绝不能"存在实例里、用类型名当键"。
 
 ---
 

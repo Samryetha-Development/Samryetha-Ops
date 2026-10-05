@@ -34,17 +34,14 @@ func (b *base) run(cx *drivers.Context, argv ...string) (string, error) {
 // --- pm2 ---
 
 // PM2 通过 pm2 管理进程。
-type PM2 struct {
-	base
-	Names []string
-}
+type PM2 struct{ base }
 
-func NewPM2(k sdk.Kernel, names []string) *PM2 { return &PM2{base{k}, names} }
-func (p *PM2) Name() string                    { return "pm2" }
-func (p *PM2) Capabilities() []string          { return []string{"processes"} }
+func NewPM2(k sdk.Kernel) *PM2        { return &PM2{base{k}} }
+func (p *PM2) Name() string           { return "pm2" }
+func (p *PM2) Capabilities() []string { return []string{"processes"} }
 
-func (p *PM2) Reload(cx *drivers.Context) error {
-	for _, n := range p.Names {
+func (p *PM2) Reload(cx *drivers.Context, ref drivers.ProcessRef) error {
+	for _, n := range ref.Names {
 		if _, err := p.run(cx, "pm2", "reload", n); err != nil {
 			return fmt.Errorf("pm2 reload %s: %w", n, err)
 		}
@@ -52,15 +49,15 @@ func (p *PM2) Reload(cx *drivers.Context) error {
 	return nil
 }
 
-func (p *PM2) Restart(cx *drivers.Context) error {
-	if _, err := p.run(cx, "pm2", "restart", strings.Join(p.Names, " ")); err != nil {
+func (p *PM2) Restart(cx *drivers.Context, ref drivers.ProcessRef) error {
+	if _, err := p.run(cx, "pm2", "restart", strings.Join(ref.Names, " ")); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (p *PM2) Stop(cx *drivers.Context) error {
-	for _, n := range p.Names {
+func (p *PM2) Stop(cx *drivers.Context, ref drivers.ProcessRef) error {
+	for _, n := range ref.Names {
 		if _, err := p.run(cx, "pm2", "stop", n); err != nil {
 			return err
 		}
@@ -68,7 +65,7 @@ func (p *PM2) Stop(cx *drivers.Context) error {
 	return nil
 }
 
-func (p *PM2) Status(cx *drivers.Context) ([]drivers.ProcessStatus, error) {
+func (p *PM2) Status(cx *drivers.Context, ref drivers.ProcessRef) ([]drivers.ProcessStatus, error) {
 	out, err := p.run(cx, "pm2", "jlist")
 	if err != nil {
 		return nil, err
@@ -79,17 +76,14 @@ func (p *PM2) Status(cx *drivers.Context) ([]drivers.ProcessStatus, error) {
 // --- systemd ---
 
 // Systemd 通过 systemctl 管理单元。
-type Systemd struct {
-	base
-	Units []string
-}
+type Systemd struct{ base }
 
-func NewSystemd(k sdk.Kernel, units []string) *Systemd { return &Systemd{base{k}, units} }
-func (s *Systemd) Name() string                        { return "systemd" }
-func (s *Systemd) Capabilities() []string              { return []string{"processes"} }
+func NewSystemd(k sdk.Kernel) *Systemd    { return &Systemd{base{k}} }
+func (s *Systemd) Name() string           { return "systemd" }
+func (s *Systemd) Capabilities() []string { return []string{"processes"} }
 
-func (s *Systemd) Reload(cx *drivers.Context) error {
-	for _, u := range s.Units {
+func (s *Systemd) Reload(cx *drivers.Context, ref drivers.ProcessRef) error {
+	for _, u := range ref.Names {
 		// systemd 无 reload 语义时退化为 restart（由单元自身决定）
 		if _, err := s.run(cx, "systemctl", "reload-or-restart", u); err != nil {
 			return fmt.Errorf("systemctl reload-or-restart %s: %w", u, err)
@@ -98,8 +92,8 @@ func (s *Systemd) Reload(cx *drivers.Context) error {
 	return nil
 }
 
-func (s *Systemd) Restart(cx *drivers.Context) error {
-	for _, u := range s.Units {
+func (s *Systemd) Restart(cx *drivers.Context, ref drivers.ProcessRef) error {
+	for _, u := range ref.Names {
 		if _, err := s.run(cx, "systemctl", "restart", u); err != nil {
 			return err
 		}
@@ -107,8 +101,8 @@ func (s *Systemd) Restart(cx *drivers.Context) error {
 	return nil
 }
 
-func (s *Systemd) Stop(cx *drivers.Context) error {
-	for _, u := range s.Units {
+func (s *Systemd) Stop(cx *drivers.Context, ref drivers.ProcessRef) error {
+	for _, u := range ref.Names {
 		if _, err := s.run(cx, "systemctl", "stop", u); err != nil {
 			return err
 		}
@@ -116,9 +110,9 @@ func (s *Systemd) Stop(cx *drivers.Context) error {
 	return nil
 }
 
-func (s *Systemd) Status(cx *drivers.Context) ([]drivers.ProcessStatus, error) {
+func (s *Systemd) Status(cx *drivers.Context, ref drivers.ProcessRef) ([]drivers.ProcessStatus, error) {
 	var out []drivers.ProcessStatus
-	for _, u := range s.Units {
+	for _, u := range ref.Names {
 		state := "unknown"
 		if o, err := s.run(cx, "systemctl", "is-active", u); err == nil {
 			state = strings.TrimSpace(o)
@@ -133,20 +127,17 @@ func (s *Systemd) Status(cx *drivers.Context) ([]drivers.ProcessStatus, error) {
 // --- exec（通用兜底：任意重启命令） ---
 
 // Exec 执行配置里的重启命令。给不适用 pm2/systemd 的环境兜底。
-type Exec struct {
-	base
-	Commands []string
-}
+type Exec struct{ base }
 
-func NewExec(k sdk.Kernel, cmds []string) *Exec { return &Exec{base{k}, cmds} }
-func (e *Exec) Name() string                    { return "exec" }
-func (e *Exec) Capabilities() []string          { return []string{"processes"} }
+func NewExec(k sdk.Kernel) *Exec       { return &Exec{base{k}} }
+func (e *Exec) Name() string           { return "exec" }
+func (e *Exec) Capabilities() []string { return []string{"processes"} }
 
-func (e *Exec) Reload(cx *drivers.Context) error  { return e.runAll(cx) }
-func (e *Exec) Restart(cx *drivers.Context) error { return e.runAll(cx) }
+func (e *Exec) Reload(cx *drivers.Context, ref drivers.ProcessRef) error  { return e.runAll(cx, ref) }
+func (e *Exec) Restart(cx *drivers.Context, ref drivers.ProcessRef) error { return e.runAll(cx, ref) }
 
-func (e *Exec) runAll(cx *drivers.Context) error {
-	for _, c := range e.Commands {
+func (e *Exec) runAll(cx *drivers.Context, ref drivers.ProcessRef) error {
+	for _, c := range ref.Commands {
 		if _, err := e.run(cx, "sh", "-lc", c); err != nil {
 			return fmt.Errorf("exec %q: %w", c, err)
 		}
@@ -154,8 +145,8 @@ func (e *Exec) runAll(cx *drivers.Context) error {
 	return nil
 }
 
-func (e *Exec) Stop(cx *drivers.Context) error { return nil }
-func (e *Exec) Status(cx *drivers.Context) ([]drivers.ProcessStatus, error) {
+func (e *Exec) Stop(cx *drivers.Context, ref drivers.ProcessRef) error { return nil }
+func (e *Exec) Status(cx *drivers.Context, ref drivers.ProcessRef) ([]drivers.ProcessStatus, error) {
 	return []drivers.ProcessStatus{}, nil
 }
 

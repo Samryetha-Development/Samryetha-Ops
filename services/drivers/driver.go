@@ -61,12 +61,27 @@ type Source interface {
 // --- 进程驱动 ---
 
 // Processes 负责重启/停止/查看被管进程。
+// ProcessRef 指名"这一轮要操作哪些进程"，由调用方**按目标**传入。
+//
+// 为什么必须按调用传，而不是把名字存进驱动实例：同一个驱动（"pm2"）要服务多个目标，
+// 而每个目标的进程名不同。名字存进实例、再按驱动名注册进 Registry 时，后注册的目标会
+// **静默覆盖**前一个——于是"部署 main 却去重启 dev 的进程"：部署照样报成功、标记照样写、
+// 而生产进程永远不重启。这类"配置在全局表里串台"的错误不会报错，只会安静地做错事。
+type ProcessRef struct {
+	// Driver 是驱动类型名：pm2 | systemd | exec
+	Driver string
+	// Names 是进程名（pm2）或单元名（systemd）
+	Names []string
+	// Commands 供 exec 驱动使用（该目标配置的重启命令）
+	Commands []string
+}
+
 type Processes interface {
 	Driver
-	Reload(cx *Context) error
-	Restart(cx *Context) error
-	Stop(cx *Context) error
-	Status(cx *Context) ([]ProcessStatus, error)
+	Reload(cx *Context, ref ProcessRef) error
+	Restart(cx *Context, ref ProcessRef) error
+	Stop(cx *Context, ref ProcessRef) error
+	Status(cx *Context, ref ProcessRef) ([]ProcessStatus, error)
 }
 
 // ProcessStatus 是一条进程状态。

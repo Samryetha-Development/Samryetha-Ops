@@ -295,7 +295,7 @@ func (s *Service) Deploy(ctx context.Context, p Plan) Outcome {
 		if !ok {
 			return s.finish(out, start, "failed", fmt.Sprintf("process driver %q not registered", p.ProcessDriver))
 		}
-		if !step("restart", func() error { return proc.Reload(cx) }) {
+		if !step("restart", func() error { return proc.Reload(cx, procRef(p)) }) {
 			// 重启失败 → 回滚（这是最需要自动兜底的一步）
 			return s.rollback(ctx, cx, p, src, out, start, "restart failed")
 		}
@@ -351,7 +351,7 @@ func (s *Service) rollback(ctx context.Context, cx *drivers.Context, p Plan, src
 	// 回滚后必须重启，否则运行的仍是坏版本
 	if p.ProcessDriver != "" {
 		if proc, ok := s.Reg.Processes(p.ProcessDriver); ok {
-			_ = proc.Reload(cx)
+			_ = proc.Reload(cx, procRef(p))
 		}
 	}
 	// 注意：不要在这里额外 Emit——finish() 会按 state 发出完整事件。
@@ -500,6 +500,15 @@ func firstWord(s string) string {
 	return s
 }
 
+// procRef 把某个目标的进程配置整理成驱动参数。
+//
+// 名字必须来自**这个目标自己的 Plan**：驱动实例是无状态的，谁也不会替谁重启进程。
+// 见 drivers.ProcessRef 的说明（那里记着一次真实事故：按驱动名注册实例，
+// 后注册的目标覆盖前一个，结果部署 main 去重启了 dev 的进程）。
+func procRef(p Plan) drivers.ProcessRef {
+	return drivers.ProcessRef{Driver: p.ProcessDriver, Names: p.ProcessNames, Commands: p.Restart}
+}
+
 func short(rev string) string {
 	if len(rev) > 8 {
 		return rev[:8]
@@ -547,7 +556,7 @@ func (s *Service) RollbackToPrevious(ctx context.Context, p Plan) (map[string]an
 	}
 	if p.ProcessDriver != "" {
 		if proc, ok := s.Reg.Processes(p.ProcessDriver); ok {
-			if err := proc.Reload(cx); err != nil {
+			if err := proc.Reload(cx, procRef(p)); err != nil {
 				return nil, fmt.Errorf("restart after rollback: %w", err)
 			}
 		}

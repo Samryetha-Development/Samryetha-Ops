@@ -191,3 +191,64 @@ func TestDeployNeededFollowsRevisionMarkerAndHealth(t *testing.T) {
 		}
 	})
 }
+
+// recordingProcesses 记录每次被要求重启哪些进程。
+type recordingProcesses struct {
+	mu      sync.Mutex
+	reloads [][]string
+}
+
+func (r *recordingProcesses) Name() string           { return "pm2" }
+func (r *recordingProcesses) Capabilities() []string { return []string{"processes"} }
+func (r *recordingProcesses) Reload(cx *drivers.Context, ref drivers.ProcessRef) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reloads = append(r.reloads, append([]string(nil), ref.Names...))
+	return nil
+}
+func (r *recordingProcesses) Restart(cx *drivers.Context, ref drivers.ProcessRef) error { return nil }
+func (r *recordingProcesses) Stop(cx *drivers.Context, ref drivers.ProcessRef) error    { return nil }
+func (r *recordingProcesses) Status(cx *drivers.Context, ref drivers.ProcessRef) ([]drivers.ProcessStatus, error) {
+	return nil, nil
+}
+
+// 每个目标只能重启**自己的**进程。
+//
+// 这是真实事故的回归测试：进程名曾存在驱动实例里、并按驱动名（"pm2"）注册进
+// Registry，于是后注册的 dev 覆盖了 main；结果每次部署 main 都去 reload dev 的进程，
+// 而 main 的生产进程连续 18 小时没被重启过（部署却一直"成功"、标记也一直在写）。
+// 现在驱动是无状态的，进程名由调用方按目标传入，串台在结构上不可能发生。
+func TestRestartUsesEachTargetsOwnProcessNames(t *testing.T) {
+	reg := drivers.NewRegistry()
+	reg.AddSource(fakeSource{})
+	rec := &recordingProcesses{}
+	reg.AddProcesses(rec)
+	s := New(nopKernel{}, reg)
+
+	plans := []Plan{
+		{ID: "main", Source: "fake", ProcessDriver: "pm2",
+			ProcessNames: []string{"samryetha-backend", "samryetha-frontend"}},
+		{ID: "dev", Source: "fake", ProcessDriver: "pm2",
+			ProcessNames: []string{"samryetha-dev-backend", "samryetha-dev-frontend"}},
+	}
+	for _, p := range plans {
+		if out := s.Deploy(context.Background(), p); out.State != "succeeded" {
+			t.Fatalf("%s 部署应成功，实际 state=%q err=%q", p.ID, out.State, out.Err)
+		}
+	}
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.reloads) != 2 {
+		t.Fatalf("应有两次重启调用，实际 %d 次：%#v", len(rec.reloads), rec.reloads)
+	}
+	want := [][]string{
+		{"samryetha-backend", "samryetha-frontend"},
+		{"samryetha-dev-backend", "samryetha-dev-frontend"},
+	}
+	for i := range want {
+		if strings.Join(rec.reloads[i], ",") != strings.Join(want[i], ",") {
+			t.Fatalf("第 %d 次重启用错了进程名：拿到 %#v，应为 %#v", i+1, rec.reloads[i], want[i])
+		}
+	}
+}

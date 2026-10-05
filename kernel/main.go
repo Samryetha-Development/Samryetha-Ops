@@ -402,14 +402,18 @@ func startServices(root string, table syscall.Table, bus *events.Bus, klog *kern
 			klog.add("info", "target "+t.ID+" is disabled; not scheduling it", nil)
 			continue
 		}
-		// 进程驱动按配置实例化
+		// 进程驱动按配置实例化。
+		//
+		// 驱动**不携带**目标参数：要操作哪个目标的哪些进程，由部署时传入的
+		// ProcessRef 决定。以前名字存在实例里、又按驱动名注册，后注册的目标会
+		// 覆盖前一个——表现为"部署 main 去重启 dev 的进程"，且完全不报错。
 		switch t.ProcessDriver {
 		case "pm2":
-			reg.AddProcesses(processdriver.NewPM2(k, t.ProcessNames))
+			reg.AddProcesses(processdriver.NewPM2(k))
 		case "systemd":
-			reg.AddProcesses(processdriver.NewSystemd(k, t.ProcessNames))
+			reg.AddProcesses(processdriver.NewSystemd(k))
 		case "exec":
-			reg.AddProcesses(processdriver.NewExec(k, t.Restart))
+			reg.AddProcesses(processdriver.NewExec(k))
 		}
 		// 生效值写进计划：控制台用它回显"自动部署"开关。
 		cron, on := scheduleOf(t.ID)
