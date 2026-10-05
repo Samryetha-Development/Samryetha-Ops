@@ -2,6 +2,7 @@ package deployer
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -137,4 +138,56 @@ func TestDeployFailsWhenMigrationDriverMissing(t *testing.T) {
 	if !strings.Contains(out.Err, "not registered") {
 		t.Fatalf("错误应说明驱动未注册，实际 %q", out.Err)
 	}
+}
+
+// deployNeeded 决定"这一轮到底要不要跑流水线"。它必须挡在 before_deploy 之前：
+// dev 的钩子会拿主站快照覆盖数据库，而 dev 的会话就在那个库里——每 5 分钟覆盖一次
+// 等于每 5 分钟把所有人踢下线。真实事故的背景见 service.go 里的注释。
+func TestDeployNeededFollowsRevisionMarkerAndHealth(t *testing.T) {
+	ctx := context.Background()
+	cx := &drivers.Context{Ctx: ctx}
+
+	t.Run("有新提交 → 要部署", func(t *testing.T) {
+		s := New(nopKernel{}, drivers.NewRegistry())
+		need, why := s.deployNeeded(cx, Plan{ID: "t"}, "aaaa", "bbbb")
+		if !need || !strings.Contains(why, "new revision") {
+			t.Fatalf("有新提交时必须部署，实际 need=%v why=%q", need, why)
+		}
+	})
+
+	t.Run("版本一致 + 标记一致 + 无探活 → 跳过", func(t *testing.T) {
+		k := &scriptedKernel{reply: map[string]map[string]any{"fs.read": {"data": "bbbb\n"}}}
+		s := New(k, drivers.NewRegistry())
+		need, why := s.deployNeeded(cx, Plan{ID: "t", Marker: "markers:.last-deployed"}, "bbbb", "bbbb")
+		if need {
+			t.Fatalf("没有新提交且标记一致时应跳过，实际 need=true why=%q", why)
+		}
+	})
+
+	t.Run("版本一致但标记对不上（上轮没走完）→ 要部署", func(t *testing.T) {
+		k := &scriptedKernel{reply: map[string]map[string]any{"fs.read": {"data": "oldrev\n"}}}
+		s := New(k, drivers.NewRegistry())
+		need, why := s.deployNeeded(cx, Plan{ID: "t", Marker: "markers:.last-deployed"}, "bbbb", "bbbb")
+		if !need || !strings.Contains(why, "marker") {
+			t.Fatalf("标记不匹配时必须补部署，实际 need=%v why=%q", need, why)
+		}
+	})
+
+	t.Run("标记读不到 → 要部署", func(t *testing.T) {
+		k := &scriptedKernel{failed: map[string]error{"fs.read": errors.New("no such file")}}
+		s := New(k, drivers.NewRegistry())
+		if need, _ := s.deployNeeded(cx, Plan{ID: "t", Marker: "markers:.last-deployed"}, "bbbb", "bbbb"); !need {
+			t.Fatal("标记缺失时必须部署（否则首次部署会被跳过）")
+		}
+	})
+
+	t.Run("解析不到版本 / 没有本地版本 → 要部署", func(t *testing.T) {
+		s := New(nopKernel{}, drivers.NewRegistry())
+		if need, _ := s.deployNeeded(cx, Plan{ID: "t"}, "aaaa", ""); !need {
+			t.Fatal("目标版本为空时必须部署")
+		}
+		if need, _ := s.deployNeeded(cx, Plan{ID: "t"}, "", "bbbb"); !need {
+			t.Fatal("没有本地版本时必须部署")
+		}
+	})
 }

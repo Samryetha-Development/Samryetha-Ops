@@ -170,14 +170,6 @@ func (s *Service) Deploy(ctx context.Context, p Plan) Outcome {
 		}
 	}
 
-	// 0) 前置钩子
-	for _, h := range p.BeforeDeploy {
-		hook := h
-		if !step("hook:"+firstWord(hook), func() error { return s.shell(cx, hook) }) {
-			return s.finish(out, start, "failed", "before_deploy hook failed")
-		}
-	}
-
 	// 1) 拉取
 	if !step("fetch", func() error { return src.Fetch(cx) }) {
 		return s.finish(out, start, "failed", "fetch failed")
@@ -193,6 +185,32 @@ func (s *Service) Deploy(ctx context.Context, p Plan) Outcome {
 		return s.finish(out, start, "failed", "resolve failed")
 	}
 	out.To = toRev
+
+	// 2.5) 没有新提交就不部署——**必须在 before_deploy 之前判断**。
+	//
+	// 为什么：目标是被 cron 定期"检查"的（dev/main 都是每 5 分钟一轮），而流水线里
+	// 塞满了有副作用的步骤：dev 的 before_deploy 会拿主站快照覆盖 dev 数据库
+	// （dev 的登录会话就存在那个库里 → 每次覆盖都把所有人踢下线）、还有构建与重启。
+	// 不做这个判断，这些副作用就是"每 5 分钟一次"，而不是"有新提交时一次"。
+	if need, why := s.deployNeeded(cx, p, out.From, out.To); !need {
+		out.State = "unchanged"
+		out.Ended = time.Now().UnixMilli()
+		out.Duration = out.Ended - out.Started
+		cx.Log("info", fmt.Sprintf("no new revision at %s; skipping hooks, build and restart", short(out.To)), nil)
+		// 刻意不写标记、不发事件：标记的时间戳是"上一次真正部署的时间"，
+		// 事件流里也不该出现每 5 分钟一条的空转记录。
+		return out
+	} else {
+		cx.Log("info", "deploying: "+why, nil)
+	}
+
+	// 0) 前置钩子（在构建/重启之前；见 deploy.yaml 里对各钩子的说明）
+	for _, h := range p.BeforeDeploy {
+		hook := h
+		if !step("hook:"+firstWord(hook), func() error { return s.shell(cx, hook) }) {
+			return s.finish(out, start, "failed", "before_deploy hook failed")
+		}
+	}
 
 	// 3) 变更文件（用于判断是否需要迁移/重装依赖）
 	if !step("diff", func() error {
@@ -399,6 +417,43 @@ func (s *Service) shell(cx *drivers.Context, cmd string) error {
 		time.Sleep(500 * time.Millisecond)
 	}
 	return fmt.Errorf("%s: timeout waiting for completion", cmd)
+}
+
+// deployNeeded 判断这一轮是否真的需要跑完整流水线。
+//
+// 目标是按 cron **定期检查**的（Samryetha 上 dev/main 都是每 5 分钟），而流水线里
+// 有带副作用的步骤：before_deploy 钩子（dev 会拿主站快照覆盖 dev 数据库，而 dev 的
+// 登录会话就存在那个库里 → 每次覆盖都把所有人踢下线）、构建、重启。
+// 没有这个判断时，副作用每 5 分钟发生一次；需要的是"有新提交时"发生一次。
+//
+// 判据（任一成立就部署），返回的字符串用于日志说明"为什么这轮要部署"：
+//   - 解析不到目标版本；
+//   - 目标版本与本地版本不同（有新提交）；
+//   - 部署标记与目标版本不一致（上一轮没走完，得补上）；
+//   - 探活失败（实例挂了要能自愈，而不是"没变化"就永远不管）。
+func (s *Service) deployNeeded(cx *drivers.Context, p Plan, from, to string) (bool, string) {
+	if to == "" {
+		return true, "target revision unresolved"
+	}
+	if from == "" {
+		return true, "no local revision recorded"
+	}
+	if to != from {
+		return true, "new revision " + short(to)
+	}
+	if p.Marker != "" {
+		v, err := sdk.FsRead(s.K, p.Marker)
+		if err != nil || trimNewline(v) != to {
+			return true, "deployment marker does not match " + short(to)
+		}
+	}
+	// 探活放在最后：它是唯一会真的起进程/发请求的一步，健康时第一次就通过。
+	for _, h := range p.Health {
+		if err := s.checkHealth(cx, h); err != nil {
+			return true, "health check failed (" + err.Error() + ")"
+		}
+	}
+	return false, ""
 }
 
 func (s *Service) checkHealth(cx *drivers.Context, h drivers.HealthSpec) error {
