@@ -40,6 +40,7 @@ LANGS = ["zh", "en", "ja", "fr", "de", "es"]
 # ============================ 多语言文案 ============================
 STRINGS = {
     "zh": {
+        "banner_types": "TypeScript 类型系统有 {n} 处错误（见下方代码体检）",
         "title": "Samryetha 服务状态",
         "all_ok": "所有系统正常运行", "partial": "部分系统异常", "major": "服务中断",
         "h_components": "系统组件", "h_uptime": "过去 90 天可用率", "h_metrics": "实时指标",
@@ -87,6 +88,7 @@ STRINGS = {
         "i_check_gap": "状态检查间隔异常（{gap} 秒），可能有服务重启",
     },
     "en": {
+        "banner_types": "TypeScript type check failed with {n} error(s) — see the code audit below",
         "title": "Samryetha Status",
         "all_ok": "All Systems Operational", "partial": "Partial Outage", "major": "Major Outage",
         "h_components": "System Components", "h_uptime": "90-Day Uptime", "h_metrics": "Live Metrics",
@@ -134,6 +136,7 @@ STRINGS = {
         "i_check_gap": "Abnormal check interval ({gap} s), possible service restart",
     },
     "ja": {
+        "banner_types": "TypeScript の型チェックで {n} 件のエラー（下のコード監査を参照）",
         "title": "Samryetha ステータス",
         "all_ok": "すべてのシステムが正常に稼働中", "partial": "一部のシステムに障害", "major": "大規模な障害",
         "h_components": "システムコンポーネント", "h_uptime": "直近 90 日の稼働率", "h_metrics": "リアルタイム指標",
@@ -181,6 +184,7 @@ STRINGS = {
         "i_check_gap": "チェック間隔が異常（{gap} 秒）、再起動の可能性",
     },
     "fr": {
+        "banner_types": "Le contrôle de types TypeScript a échoué : {n} erreur(s) (voir l'audit ci-dessous)",
         "title": "État du service Samryetha",
         "all_ok": "Tous les systèmes sont opérationnels", "partial": "Panne partielle", "major": "Panne majeure",
         "h_components": "Composants du système", "h_uptime": "Disponibilité sur 90 jours", "h_metrics": "Métriques en direct",
@@ -228,6 +232,7 @@ STRINGS = {
         "i_check_gap": "Intervalle de vérification anormal ({gap} s)",
     },
     "de": {
+        "banner_types": "TypeScript-Typprüfung fehlgeschlagen: {n} Fehler (siehe Code-Audit unten)",
         "title": "Samryetha Servicestatus",
         "all_ok": "Alle Systeme sind funktionsfähig", "partial": "Teilausfall", "major": "Schwerer Ausfall",
         "h_components": "Systemkomponenten", "h_uptime": "Verfügbarkeit (90 Tage)", "h_metrics": "Live-Metriken",
@@ -275,6 +280,7 @@ STRINGS = {
         "i_check_gap": "Anomaler Prüfintervall ({gap} s), möglicher Neustart",
     },
     "es": {
+        "banner_types": "La comprobación de tipos de TypeScript falló: {n} error(es) (ver auditoría abajo)",
         "title": "Estado del servicio de Samryetha",
         "all_ok": "Todos los sistemas operativos", "partial": "Interrupción parcial", "major": "Interrupción grave",
         "h_components": "Componentes del sistema", "h_uptime": "Disponibilidad de 90 días", "h_metrics": "Métricas en vivo",
@@ -742,6 +748,25 @@ def run_detectors(h, d):
 
 
 
+def type_errors(rep):
+    """返回类型系统（tsc）报的 error。
+
+    同时看 rule 前缀与 analyzer：rule 形如 `tsc(TS2339)`，analyzer 也会标成 `tsc`。
+    只看一个字段的话，任何一边改名都会让这个告警悄悄失效——而"悄悄失效的告警"
+    比没有告警更坏（页面会一直显示一切正常）。
+    """
+    if not rep:
+        return []
+    out = []
+    for f in (rep.get("findings") or []):
+        if f.get("sev") != "error":
+            continue
+        rule = str(f.get("rule", ""))
+        if rule.startswith("tsc(") or f.get("analyzer") == "tsc":
+            out.append(f)
+    return out
+
+
 def read_code_report():
     try:
         with open(os.path.join(ROOT, "status", "data", "code-report.json"), encoding="utf-8") as f:
@@ -1052,6 +1077,8 @@ def render(d, series, overall, h, lang):
     incidents_html = render_incidents(h, lang)
 
     rep = d.get("code_report")
+    terr = type_errors(rep)
+    type_banner = ("<div class=\"banner type-system\">" + esc(t["banner_types"].format(n=len(terr))) + "</div>") if terr else ""
     if rep and rep.get("findings"):
         dur = rep.get("duration_ms", 0)
         audit_summary = (str(rep["totals"]["errors"]) + " " + t["t_sev"] + " · "
@@ -1184,6 +1211,7 @@ body {{ background:var(--bg); color:var(--text); font-family:system-ui,-apple-sy
 .banner.ok {{ background:var(--ok); }}
 .banner.warn {{ background:var(--warn); }}
 .banner.bad {{ background:var(--bad); }}
+.banner.type-system {{ margin-top:12px; background:var(--bad); }}
 h2 {{ font-size:14px; font-weight:600; color:var(--muted); margin:28px 0 10px; letter-spacing:.3px; }}
 .panel {{ background:var(--panel); border:1px solid var(--border); border-radius:10px; overflow:hidden; }}
 .comp {{ display:flex; justify-content:space-between; align-items:center; padding:14px 18px; border-bottom:1px solid var(--row); gap:12px; }}
@@ -1268,6 +1296,7 @@ h2 {{ font-size:14px; font-weight:600; color:var(--muted); margin:28px 0 10px; l
     </div>
   </div>
   <div class="banner {bcls}">{esc(banner)}</div>
+  {type_banner}
   {notice_html}
 
   <h2>{esc(t["h_components"])}</h2>
