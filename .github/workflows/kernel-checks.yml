@@ -56,6 +56,11 @@ jobs:
       - name: deploy.yaml self-consistency
         run: go run ./cmd/cfgcheck
 
+      - name: Frontend deployment integrity gate
+        run: |
+          bash -n scripts/build-forum-frontend.sh
+          bash scripts/test-build-forum-frontend.sh
+
       - name: service-level checks (update-service)
         working-directory: update-service
         run: |
