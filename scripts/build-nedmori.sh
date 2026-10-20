@@ -1,10 +1,44 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export PATH=/home/ubuntu/.nvm/versions/node/v24.20.0/bin:/home/ubuntu/.local/bin:$PATH
+if [ -f /opt/nedmori-config/build.log ]; then
+  cp /opt/nedmori-config/build.log /opt/nedmori-config/build.previous.log
+fi
 exec > >(tee /opt/nedmori-config/build.log) 2>&1
 
 # Build only committed source. The served release and mutable data are untouched.
 root=$(realpath "${1:?usage: build-nedmori.sh /absolute/git/checkout}")
 revision=$(git -C "$root" rev-parse HEAD)
+validate_config() {
+  .venv/bin/python - /opt/nedmori-config/.env <<'PY'
+import sys
+from pathlib import Path
+from urllib.parse import urlsplit
+from nedmori.__main__ import load_env
+from nedmori.auth.config import auth_config_from_env
+load_env(sys.argv[1])
+config = auth_config_from_env()
+assert config.get('enabled') is True, 'Production requires configured OIDC'
+assert urlsplit(config['appOrigin']).scheme == 'https'
+assert urlsplit(config['issuer']).scheme == 'https'
+assert Path('/opt/nedmori-data').is_dir()
+PY
+}
+# A restart retry can reuse a candidate only after all prior gates completed for
+# this exact commit. Failed/partial builds never write .candidate-release.
+if [ -f "$root/.candidate-release" ]; then
+  candidate=$(cat "$root/.candidate-release")
+  if [[ "$candidate" == /opt/nedmori-releases/* ]] &&
+     [ -f "$candidate/RELEASE_REVISION" ] &&
+     [ "$(cat "$candidate/RELEASE_REVISION")" = "$revision" ]; then
+    cd "$candidate"
+    validate_config
+    manager=$(node -p 'JSON.parse(require("fs").readFileSync("package.json", "utf8")).packageManager')
+    corepack "$manager" verify:artifacts
+    printf 'Reusing fully validated same-revision candidate: %s\n' "$candidate"
+    exit 0
+  fi
+fi
 release=$(mktemp -d "/opt/nedmori-releases/${revision:0:12}.XXXXXXXX")
 git -C "$root" archive HEAD | tar -xf - -C "$release"
 cd "$release"
@@ -22,19 +56,7 @@ corepack "$manager" build
 corepack "$manager" verify:artifacts
 
 # No demo-auth fallback is allowed on the public deployment.
-.venv/bin/python - /opt/nedmori-config/.env <<'PY'
-import sys
-from pathlib import Path
-from urllib.parse import urlsplit
-from nedmori.__main__ import load_env
-from nedmori.auth.config import auth_config_from_env
-load_env(sys.argv[1])
-config = auth_config_from_env()
-assert config.get('enabled') is True, 'Production requires configured OIDC'
-assert urlsplit(config['appOrigin']).scheme == 'https'
-assert urlsplit(config['issuer']).scheme == 'https'
-assert Path('/opt/nedmori-data').is_dir()
-PY
+validate_config
 if [ -e backend/data ]; then
   # The suite may create disposable default stores. Never serve them as live data.
   test ! -L backend/data
@@ -45,6 +67,7 @@ ln -s /opt/nedmori-data backend/data
 ln -s /opt/nedmori-config/.env .env
 chmod 755 "$release"
 printf '%s\n' "$revision" > RELEASE_REVISION
+cp /opt/nedmori-config/build.log BUILD_VERIFICATION.log
 printf '%s\n' "$release" > "$root/.candidate-release.tmp"
 mv "$root/.candidate-release.tmp" "$root/.candidate-release"
 printf 'Validated release ready: %s\n' "$release"

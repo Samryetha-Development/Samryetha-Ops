@@ -43,6 +43,12 @@ Failed builds never change the current pointer. Failed activation attempts resto
 the previous pointer/process when available, retaining the failed release and
 data snapshot for inspection. A first-deployment failure has no previous release.
 Inspect both the Ops outcome and `/opt/nedmori-config/deployment-result.json`.
+An activation retry reuses `.candidate-release` only when its completed
+`RELEASE_REVISION` matches the exact Git commit. It rechecks production auth and
+frontend artifacts; partial builds cannot create that pointer. The full original
+checks are retained in `BUILD_VERIFICATION.log`. A different commit builds fresh.
+Both scripts select the same Node 24/PM2 path as the kernel systemd unit; PM2
+configuration uses its supported `.config.json` format.
 
 ## Rollback and operation
 
