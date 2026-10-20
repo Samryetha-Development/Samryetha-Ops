@@ -38,4 +38,3 @@ for attempt in $(seq 1 30); do
   sleep 1
 done
 rollback
-
