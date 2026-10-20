@@ -1,0 +1,17 @@
+# Append this target to the active deploy.yaml targets list. It reuses the
+# existing Git driver with this checkout's own origin and read-only deploy key.
+  - id: nedmori
+    enabled: true
+    branch: main
+    source: git
+    workdir: /opt/Nedmori
+    build:
+      - "bash /opt/Samryetha/kernel/scripts/build-nedmori.sh /opt/Nedmori"
+    restart:
+      - "bash /opt/Samryetha/kernel/scripts/activate-nedmori.sh"
+    health:
+      - type: exec
+        command: "python3 /opt/Samryetha/kernel/scripts/health-nedmori.py"
+        timeout: 30
+    marker: "markers:.last-deployed-nedmori"
+    keep: 3
