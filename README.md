@@ -37,7 +37,9 @@ cd /opt/Samryetha/analysis && pnpm install           # 生成 node_modules（不
 ```bash
 cd update-service
 # 交叉编译（在任意机器上；服务器无需 Go 环境）
-GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o update-service .
+# 必须显式 GOTOOLCHAIN=go1.26.10 锁定精确版本：GOTOOLCHAIN 默认 auto 时本机有
+# 更新版 Go（如 1.27.2，仍在 CVE-2026-111943 范围）会照用，仅靠 go.mod 约束不住。
+GOTOOLCHAIN=go1.26.10 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o update-service .
 # 部署
 sudo install -m 0755 update-service /opt/Samryetha/status/update-service/bin/update-service
 sudo cp admin.html main.go go.mod /opt/Samryetha/status/update-service/
@@ -46,6 +48,11 @@ sudo systemctl daemon-reload && sudo systemctl enable --now samryetha-status
 ```
 
 也可用 `deploy-status-service.sh` 一键完成（systemd + Caddy 块 + 健康检查）。
+
+> **生产自更新的下载回退不现场编译 Go**：`ops_self_update.sh` 回退分支改用
+> `scripts/fallback_fetch.py`（下载 + sha256 校验 + 原子替换），只依赖 Python 标准库
+> （urllib + hashlib + os.replace），服务器只需 python3（任意 3.x，标准库即可），
+> 不需要 Go 工具链，也就不会用上未修补的 Go。
 
 ### 必需的密钥与配置
 

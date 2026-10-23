@@ -53,6 +53,12 @@ env:
   # 只在提交信息首行匹配，避免描述里提到标记时被误判
   # （曾因提交信息里解释规则本身包含 "[skip release]" 而漏发版本）
   SKIP_TOKEN: "!release-skip"
+  # 硬约束工具链：精确使用 go1.26.10，禁止升级到更高小版本（1.27.x 仍在 CVE-2026-111943 影响范围）。
+  # toolchain 行只是"建议"，GOTOOLCHAIN=auto 时本机有更新版 Go 会照用；此值才是精确版本硬约束。
+  # Hard-constrain the toolchain: force exactly go1.26.10, no upgrade to a higher patch
+  # (1.27.x is still within CVE-2026-111943). The toolchain line is only a suggestion; this value
+  # is the exact-version hard constraint.
+  GOTOOLCHAIN: "go1.26.10"
 
 jobs:
   build:
@@ -66,7 +72,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.26.10"
           cache-dependency-path: update-service/go.sum
 
       - name: Verify (gofmt + vet)
@@ -83,6 +89,13 @@ jobs:
           go build -trimpath -ldflags "-s -w" -o dist/update-service .
           file dist/update-service
           sha256sum dist/update-service > dist/update-service.sha256
+
+      - name: Assert Go toolchain is exactly go1.26.10
+        run: |
+          # 断言：构建工具链必须精确为 go1.26.10，防止 GOTOOLCHAIN 在别处被绕过后用上未修补版本
+          # Assert: the build toolchain must be exactly go1.26.10, guarding against GOTOOLCHAIN bypass
+          go version
+          go version | grep -qF 'go1.26.10' || { echo "错误：工具链不是 go1.26.10"; exit 1; }
 
       - name: Smoke test (starts and serves /healthz)
         run: |
@@ -114,7 +127,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.22"
+          go-version: "1.26.10"
 
       - uses: actions/setup-python@v5
         with:
@@ -137,6 +150,13 @@ jobs:
           go build -trimpath -ldflags "-s -w" -o dist/kernel ./kernel
           file dist/kernel
           sha256sum dist/kernel > dist/kernel.sha256
+
+      - name: Assert Go toolchain is exactly go1.26.10
+        run: |
+          # 断言：构建工具链必须精确为 go1.26.10，防止 GOTOOLCHAIN 在别处被绕过后用上未修补版本
+          # Assert: the build toolchain must be exactly go1.26.10, guarding against GOTOOLCHAIN bypass
+          go version
+          go version | grep -qF 'go1.26.10' || { echo "错误：工具链不是 go1.26.10"; exit 1; }
 
       - name: Smoke test (boots with no config and serves /healthz)
         # 没有 deploy.yaml 时内核应以"救援模式"启动，但 HTTP 面必须可用。

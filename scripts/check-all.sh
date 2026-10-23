@@ -9,6 +9,15 @@
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
+# 硬约束工具链：精确使用 go1.26.10，禁止升级到更高小版本（1.27.x 仍在 CVE-2026-111943 影响范围）。
+# 为什么不能用 go.mod 的 toolchain 行：toolchain 只是"建议"，GOTOOLCHAIN 默认 auto 时本机若有
+# 更新版 Go 会照用；GOTOOLCHAIN=go1.26.10 才是"精确版本、禁止升级"的硬约束。
+# Hard-constrain the toolchain: force exactly go1.26.10, no upgrade to a higher patch
+# (1.27.x is still within CVE-2026-111943). Why the go.mod toolchain line is not enough: it is
+# only a suggestion — GOTOOLCHAIN defaults to auto, which uses a newer local Go if present;
+# GOTOOLCHAIN=go1.26.10 is the hard "exact version, no upgrade" constraint.
+export GOTOOLCHAIN=go1.26.10
+
 fail=0
 step() { printf '\n=== %s ===\n' "$1"; }
 ok()   { echo "  ✓ $1"; }
@@ -31,6 +40,13 @@ step "go build"
 if ! go build ./... >/tmp/build.out 2>&1; then
   bad "编译失败"; sed 's/^/    /' /tmp/build.out
 else ok "编译通过"; fi
+
+step "go 工具链版本断言"
+# 构建后必须确认用的是 go1.26.10，防止有人在别处绕过 GOTOOLCHAIN
+# Assert after build that go1.26.10 is actually in use, guarding against GOTOOLCHAIN bypass
+if ! go version | grep -qF 'go1.26.10'; then
+  bad "工具链不是 go1.26.10（$(go version)）"
+else ok "工具链 = go1.26.10"; fi
 
 step "syscall 契约（实现 vs 权限表）"
 python3 scripts/check-syscall-contract.py || bad "契约不一致"
