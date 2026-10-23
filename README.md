@@ -37,8 +37,8 @@ cd /opt/Samryetha/analysis && pnpm install           # 生成 node_modules（不
 ```bash
 cd update-service
 # 交叉编译（在任意机器上；服务器无需 Go 环境）
-# 必须显式 GOTOOLCHAIN=go1.26.10 锁定精确版本：go.mod 的 toolchain 行只是"建议"，
-# GOTOOLCHAIN 默认 auto 时本机有更新版 Go（如 1.27.2，仍在 CVE-2026-111943 范围）会照用。
+# 必须显式 GOTOOLCHAIN=go1.26.10 锁定精确版本：GOTOOLCHAIN 默认 auto 时本机有
+# 更新版 Go（如 1.27.2，仍在 CVE-2026-111943 范围）会照用，仅靠 go.mod 约束不住。
 GOTOOLCHAIN=go1.26.10 GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o update-service .
 # 部署
 sudo install -m 0755 update-service /opt/Samryetha/status/update-service/bin/update-service
