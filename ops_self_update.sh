@@ -93,42 +93,35 @@ for js in codecheck.mjs semantic-checks.mjs; do
   fi
 done
 
-# 控制台：优先用 CI 预编译产物（GitHub Release / artifact），其次本机 Go，最后仓库自带
+# 控制台：从 Release 下载预编译二进制（Python 下载 + sha256 校验 + 原子替换）。
+# 为什么不再用 go build 回退：生产现场编译会调用本机 Go，而 go.mod 的 toolchain 行只是"建议"，
+# GOTOOLCHAIN 默认 auto 时本机有更新版（如 1.27.2，仍在 CVE-2026-111943 范围）会照用，约束不住。
+# 回退改为「校验 sha256 的 Python 下载 + 仓库预编译二进制」，完全不依赖 Go 工具链。
+# Console: download the prebuilt binary from Release (Python download + sha256 verify + atomic replace).
+# Why drop the go build fallback: on-server compilation calls the local Go, and the go.mod toolchain line
+# is only a suggestion — GOTOOLCHAIN defaults to auto, which uses a newer local Go (e.g. 1.27.2, still in
+# CVE-2026-111943) if present. The fallback is now a sha256-verified Python download + repo prebuilt.
 SVC_SRC="$TMP/update-service"
 SVC_STAGE="$TMP/out-update-service"
 mkdir -p "$SVC_STAGE"
 cp "$SVC_SRC/admin.html" "$SVC_STAGE/" 2>/dev/null || true
 
-# 1) 从 Release 附件下载（最优：服务器零 Go 依赖，且产物已在 CI 冒烟过）
-# 从 Release 下载预编译产物（OPS_SLUG 已在文件顶部定义）
+# 从 Release 下载预编译产物（OPS_SLUG 已在文件顶部定义）。fallback_fetch.py 内含超时、重定向、
+# HTTPS、sha256 校验（失败即拒绝）、临时文件 + os.replace 原子替换；失败只报错退出，绝不退回 go build。
+# Download the prebuilt artifact from Release (OPS_SLUG is defined at the top). fallback_fetch.py includes
+# timeout, redirect handling, HTTPS, sha256 verify (reject on mismatch), temp file + os.replace atomic
+# replace; on failure it only errors out and never falls back to go build.
 LATEST_BIN_URL="https://github.com/${OPS_SLUG}/releases/latest/download/update-service"
-download_binary() {
-  local url="$1" out="$2"
-  curl -fsSL --max-time 120 "$url" -o "$out" 2>>"$LOG_FILE" || return 1
-  [ -s "$out" ] || return 1
-  # 必须是 linux/amd64 ELF 才接受，防止下到 HTML 错误页
-  if command -v file >/dev/null 2>&1; then
-    file "$out" | grep -q "ELF 64-bit.*x86-64" || return 1
-  fi
-  chmod 755 "$out"
-  return 0
-}
-
 BIN_SRC="$SVC_SRC/bin/update-service-linux-amd64"
-if download_binary "$LATEST_BIN_URL" "$SVC_STAGE/update-service"; then
-  log "==> 已从 Release 下载预编译 update-service"
-elif command -v go >/dev/null 2>&1; then
-  log "==> Release 不可用，改用本机 Go 编译"
-  if ! (cd "$SVC_SRC" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -trimpath \
-        -ldflags "-s -w" -o "$SVC_STAGE/update-service" .) >> "$LOG_FILE" 2>&1; then
-    fail "Go 编译失败"
-    exit 1
-  fi
+if python3 "$TMP/scripts/fallback_fetch.py" \
+     "$LATEST_BIN_URL" "$LATEST_BIN_URL.sha256" "$SVC_STAGE/update-service" >> "$LOG_FILE" 2>&1; then
+  log "==> 已从 Release 下载并校验 update-service（sha256 通过）"
 elif [ -f "$BIN_SRC" ]; then
-  log "==> 使用仓库预编译二进制"
+  log "==> Release 下载失败，改用仓库预编译二进制"
   cp "$BIN_SRC" "$SVC_STAGE/update-service"
+  chmod 755 "$SVC_STAGE/update-service"
 else
-  fail "Release/Go/预编译产物都不可用：保留现有控制台二进制，仅更新脚本部分"
+  fail "Release 下载与仓库预编译产物都不可用：保留现有控制台二进制，仅更新脚本部分"
   SKIP_SVC=1
 fi
 
